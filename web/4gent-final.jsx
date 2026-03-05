@@ -1,3 +1,5 @@
+"use client";
+
 import { useState, useEffect, useRef } from "react";
 import { PrivyProvider, usePrivy, useWallets } from "@privy-io/react-auth";
 
@@ -267,7 +269,7 @@ function App() {
   return (
     <div style={{minHeight:"100vh",background:"#F5F2EA",color:"#0A0A0A",fontFamily:M,display:"flex",flexDirection:"column",position:"relative"}}>
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@400;600;700&display=swap');
+        @import url("https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@400;600;700&display=swap");
         *{box-sizing:border-box;margin:0;padding:0}
         ::-webkit-scrollbar{width:2px}::-webkit-scrollbar-thumb{background:#C9A84C55}
         .pg{position:fixed;inset:0;pointer-events:none;z-index:0;
@@ -841,7 +843,6 @@ export default function FourGent() {
         appearance: {
           theme: "dark",
           accentColor: "#C9A84C",
-          logo: "https://4gent-io1u.vercel.app/logo.png",
           walletList: [],
         },
         defaultChain: {
@@ -866,7 +867,6 @@ export default function FourGent() {
         embeddedWallets: {
           createOnLogin: "all-users",
           requireUserPasswordOnCreate: false,
-          showWalletUiOnConnect: false,
           noPromptOnSignature: false,
         },
       }}
