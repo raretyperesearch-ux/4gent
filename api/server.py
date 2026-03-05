@@ -19,14 +19,18 @@ load_dotenv()
 
 
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, UploadFile, File
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, UploadFile, File, Header, Depends
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from supabase import create_client, Client
 
-from core.launch import launch_agent, LaunchConfig
+# Ensure local packages are importable (fourmeme, etc.)
+import sys as _sys, os as _os
+_sys.path.insert(0, _os.path.join(_os.path.dirname(__file__), "..", "packages"))
+
+from core.launch import prepare_launch, confirm_launch, LaunchConfig
 from core.monitor import FourMemeMonitor
 from core.scheduler import AgentScheduler, AgentRuntime
 from core.telegram import handle_owner_command
@@ -65,12 +69,18 @@ async def lifespan(app: FastAPI):
     await scheduler.load_from_supabase(db)
     logger.info("Loaded %d active agents", scheduler.count)
 
+    # Start intro post retry loop (every 10 min — catches bots not yet added to channels)
+    asyncio.create_task(scheduler.start_retry_loop())
+
     # Start monitor
     bitquery_key = os.environ.get("BITQUERY_API_KEY", "")
     if bitquery_key:
         monitor = FourMemeMonitor(api_key=bitquery_key)
         monitor.register(scheduler.on_token_event)
-        asyncio.create_task(monitor.start())
+        _monitor_task = asyncio.create_task(monitor.start())
+        _monitor_task.add_done_callback(
+            lambda t: logger.error("four.meme monitor crashed: %s", t.exception()) if t.exception() else None
+        )
         logger.info("four.meme monitor started")
     else:
         logger.warning("BITQUERY_API_KEY not set — monitor disabled")
@@ -106,8 +116,8 @@ class LaunchRequest(BaseModel):
     archetype: str = Field(default="schemer")
     prompt: str = Field(default="", max_length=1000)
     image_url: str = ""
-    tg_channel_link: str = ""
-    owner_wallet: str = ""
+    tg_channel_link: str = Field(default="", min_length=1)  # P-09: NOT NULL in schema; empty fails step 6
+    owner_wallet: str = Field(default="", min_length=1)     # P-10: NOT NULL in schema; needed for claim flow
     trading_enabled: bool = False
     max_trade_bnb: float = Field(default=0.1, ge=0, le=10)
     daily_limit_bnb: float = Field(default=1.0, ge=0, le=50)
@@ -119,6 +129,20 @@ class LaunchResponse(BaseModel):
     agent_id: str
     status: str
     message: str
+
+
+class PrepareResponse(BaseModel):
+    agent_id: str
+    create_arg: str
+    signature: str
+    contract_address: str
+    value_wei: str          # BNB to send in wei (string for JS BigInt safety)
+    calldata: str           # fully ABI-encoded tx data — frontend just submits this directly
+    status: str
+
+
+class ConfirmRequest(BaseModel):
+    tx_hash: str = ""
 
 
 class AgentStatusResponse(BaseModel):
@@ -138,7 +162,13 @@ class AgentStatusResponse(BaseModel):
     error_message: Optional[str]
 
 
-# ── Routes ────────────────────────────────────────────────────────────────────
+# ── Routes ────────────────────────────────────────────────────────────────
+
+def _verify_admin(x_admin_key: str = Header(default="")) -> None:
+    """B-16: Protect admin routes with ADMIN_API_KEY env var."""
+    expected = os.environ.get("ADMIN_API_KEY", "")
+    if not expected or x_admin_key != expected:
+        raise HTTPException(status_code=403, detail="Forbidden")
 
 @app.get("/health")
 async def health():
@@ -157,8 +187,6 @@ async def upload_image(file: UploadFile = File(...)):
     Requires WALLET_PRIVATE_KEY env var (same wallet used for token creation).
     Returns four.meme CDN URL required by create_token imgUrl field.
     """
-    import sys, os as _os
-    sys.path.insert(0, _os.path.join(_os.path.dirname(__file__), "..", "packages", "fourmeme"))
     from fourmeme.auth import FourMemeAuth
     from fourmeme.client import FourMemeClient
 
@@ -182,16 +210,23 @@ async def upload_image(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"Image upload failed: {str(e)}")
 
 
-@app.post("/launch", response_model=LaunchResponse)
-async def launch(req: LaunchRequest, background_tasks: BackgroundTasks):
+@app.post("/launch/prepare", response_model=PrepareResponse)
+async def launch_prepare(req: LaunchRequest):
     """
-    Wizard submits agent config. Creates DB row, kicks off launch pipeline
-    in background. Returns agent_id immediately for status polling.
+    Phase 1 of 2 — wizard submits config, backend fetches createArg+signature from four.meme.
+    Returns the args the frontend needs to submit createToken() via the user's own wallet.
+    User pays gas themselves — no platform wallet needed for the deploy tx.
     """
+    if not req.image_url or not req.image_url.startswith("https://"):
+        raise HTTPException(
+            status_code=400,
+            detail="image_url is required and must be a valid https:// CDN URL. "
+                   "Upload the image first via POST /upload-image."
+        )
+
     db = get_db()
     agent_id = str(uuid.uuid4())
 
-    # Create initial DB row
     db.table("agents").insert({
         "id":              agent_id,
         "name":            req.name,
@@ -205,6 +240,7 @@ async def launch(req: LaunchRequest, background_tasks: BackgroundTasks):
         "max_trade_bnb":   req.max_trade_bnb,
         "daily_limit_bnb": req.daily_limit_bnb,
         "stop_loss_pct":   req.stop_loss_pct,
+        "raise_amount_bnb": req.raise_amount_bnb,
         "status":          "pending",
     }).execute()
 
@@ -224,46 +260,86 @@ async def launch(req: LaunchRequest, background_tasks: BackgroundTasks):
         raise_amount_bnb=req.raise_amount_bnb,
     )
 
-    # Run launch pipeline in background; wizard polls /agent/:id
-    background_tasks.add_task(_run_launch, config)
+    result = await prepare_launch(config)
+    if not result.success:
+        raise HTTPException(status_code=500, detail=result.error)
 
-    return LaunchResponse(
+    return PrepareResponse(
         agent_id=agent_id,
-        status="pending",
-        message="Launch initiated. Poll /agent/{agent_id} for status.",
+        create_arg=result.create_arg,
+        signature=result.signature,
+        contract_address=result.contract_address,
+        value_wei=result.value_wei,
+        calldata=result.calldata,
+        status="awaiting_tx",
     )
 
 
-async def _run_launch(config: LaunchConfig) -> None:
-    """Background task — runs full launch pipeline then registers runtime."""
-    result = await launch_agent(config)
+@app.post("/launch/confirm/{agent_id}", response_model=LaunchResponse)
+async def launch_confirm(agent_id: str, req: ConfirmRequest, background_tasks: BackgroundTasks):
+    """
+    Phase 2 of 2 — frontend has submitted the createToken() tx from the user's wallet.
+    Receives tx_hash, runs post-deploy pipeline in background (bot, posts, claim code).
+    """
+    if not req.tx_hash or not req.tx_hash.startswith("0x"):
+        raise HTTPException(status_code=400, detail="tx_hash is required (0x...)")
+
+    db = get_db()
+    row = db.table("agents").select("status").eq("id", agent_id).execute()
+    if not row.data:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    if row.data[0]["status"] not in ("awaiting_tx", "preparing"):
+        raise HTTPException(status_code=400,
+                            detail=f"Agent is in status '{row.data[0]['status']}' — expected awaiting_tx")
+
+    background_tasks.add_task(_run_confirm, agent_id, req.tx_hash)
+
+    return LaunchResponse(
+        agent_id=agent_id,
+        status="launching",
+        message="TX received. Poll /agent/{agent_id} for status.",
+    )
+
+
+async def _run_confirm(agent_id: str, tx_hash: str) -> None:
+    """Background task — runs post-deploy pipeline then registers runtime in scheduler."""
+    result = await confirm_launch(agent_id, tx_hash)
     if result.success:
-        # Register runtime in scheduler
         db = get_db()
-        row = db.table("active_agents").select("*").eq("id", config.agent_id).execute()
+        row = db.table("agents").select(
+            "id, name, ticker, archetype, prompt, tg_channel_link, "
+            "trading_enabled, max_trade_bnb, daily_limit_bnb, stop_loss_pct, "
+            "agent_wallet, agent_wallet_enc, tg_bot_id"
+        ).eq("id", agent_id).execute()
         if row.data:
             agent = row.data[0]
+            bot_token = ""
+            if agent.get("tg_bot_id"):
+                bot_row = db.table("bot_pool").select("bot_token").eq(
+                    "id", agent["tg_bot_id"]
+                ).execute()
+                if bot_row.data:
+                    bot_token = bot_row.data[0]["bot_token"]
             runtime = AgentRuntime(
                 agent_id=agent["id"],
                 name=agent["name"],
                 ticker=agent["ticker"],
                 archetype=agent["archetype"],
                 prompt=agent["prompt"],
-                bot_token=agent["bot_token"],
+                bot_token=bot_token,
                 tg_channel=agent["tg_channel_link"],
                 trading_enabled=agent["trading_enabled"],
                 max_trade_bnb=float(agent["max_trade_bnb"]),
                 daily_limit_bnb=float(agent["daily_limit_bnb"]),
+                stop_loss_pct=float(agent.get("stop_loss_pct", 50.0)),
                 agent_wallet=agent["agent_wallet"],
                 agent_wallet_enc=agent["agent_wallet_enc"],
                 supabase=db,
             )
             scheduler.register(runtime)
-            if monitor:
-                monitor.register(runtime.handle_new_token)
-        logger.info("Agent %s launched and registered in scheduler", config.agent_id)
+        logger.info("Agent %s confirmed and registered in scheduler", agent_id)
     else:
-        logger.error("Launch failed for %s: %s", config.agent_id, result.error)
+        logger.error("Confirm failed for %s: %s", agent_id, result.error)
 
 
 @app.get("/agent/{agent_id}", response_model=AgentStatusResponse)
@@ -273,7 +349,7 @@ async def get_agent(agent_id: str):
     resp = db.table("agents").select(
         "id, name, ticker, status, token_address, agent_wallet, "
         "tg_verified, token_deployed, total_posts, total_trades, "
-        "total_fees_bnb, error_message, claim_code"
+        "total_fees_bnb, error_message, claim_code, tg_bot_id"  # N-02: tg_bot_id needed for bot_username lookup
     ).eq("id", agent_id).execute()
 
     if not resp.data:
@@ -281,11 +357,14 @@ async def get_agent(agent_id: str):
 
     a = resp.data[0]
 
-    # Get bot username
+    # B-12 fix: look up bot_username from bot_pool via tg_bot_id
     bot_username = None
-    runtime = scheduler.get(agent_id)
-    if runtime:
-        bot_username = None  # could look up from bot_pool if needed
+    if a.get("tg_bot_id"):
+        bot_resp = db.table("bot_pool").select("bot_username").eq(
+            "id", a["tg_bot_id"]
+        ).execute()
+        if bot_resp.data:
+            bot_username = bot_resp.data[0]["bot_username"]
 
     return AgentStatusResponse(
         agent_id=a["id"],
@@ -377,17 +456,23 @@ async def agent_stats(agent_id: str):
 @app.post("/verify-channel")
 async def verify_channel(body: dict):
     """
-    Pre-launch channel verification.
-    Wizard calls this before deploy step to confirm bot has admin access.
+    Pre-launch channel check — just verifies the channel exists and is public.
+    Bot admin is no longer required before launch; user adds their assigned bot after.
     """
-    from core.telegram import verify_bot_is_admin
-    bot_token = os.environ["PLATFORM_BOT_TOKEN"]
+    import httpx
     channel_link = body.get("channel_link", "")
     if not channel_link:
         raise HTTPException(status_code=400, detail="channel_link required")
 
-    is_admin = await verify_bot_is_admin(bot_token, channel_link)
-    return {"verified": is_admin, "channel_link": channel_link}
+    handle = channel_link.replace("https://t.me/", "").replace("t.me/", "").strip("/").lstrip("@")
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            r = await client.get(f"https://t.me/{handle}")
+            # t.me returns 200 for public channels, redirects/200 with "tgme_page" marker
+            exists = r.status_code == 200 and "tgme_page" in r.text
+        return {"verified": exists, "channel_link": channel_link}
+    except Exception:
+        return {"verified": False, "channel_link": channel_link}
 
 
 @app.post("/webhook/telegram")
@@ -398,12 +483,15 @@ async def telegram_webhook(request: Request):
     """
     update = await request.json()
     db = get_db()
-    asyncio.create_task(handle_owner_command(update, db))
+    task = asyncio.create_task(handle_owner_command(update, db, scheduler))  # N-06
+    task.add_done_callback(  # P-02: log exceptions that would otherwise be silently swallowed
+        lambda t: logger.error("handle_owner_command raised: %s", t.exception()) if t.exception() else None
+    )
     return {"ok": True}
 
 
 @app.get("/admin/agents")
-async def list_agents():
+async def list_agents(_: None = Depends(_verify_admin)):
     """Admin — list all agents and their status."""
     db = get_db()
     resp = db.table("agents").select(
@@ -413,7 +501,7 @@ async def list_agents():
 
 
 @app.get("/admin/bot-pool")
-async def bot_pool_status():
+async def bot_pool_status(_: None = Depends(_verify_admin)):
     """Admin — view bot pool availability."""
     db = get_db()
     resp = db.table("bot_pool").select("bot_username, available, assigned_agent_id, assigned_at").execute()
@@ -427,7 +515,7 @@ async def bot_pool_status():
 
 
 @app.post("/admin/seed-bots")
-async def seed_bots(body: dict):
+async def seed_bots(body: dict, _: None = Depends(_verify_admin)):
     """
     Seed bot pool from JSON payload.
     POST {"bots": [{"username": "@FourGentAgent1_bot", "token": "..."}]}
@@ -443,12 +531,14 @@ async def seed_bots(body: dict):
         token = b.get("token", "").strip()
         if not username or not token:
             continue
-        # Upsert — safe to call multiple times
-        db.table("bot_pool").upsert({
-            "bot_username": username,
-            "bot_token": token,
-            "available": True,
-        }, on_conflict="bot_username").execute()
+        # Upsert — safe to call multiple times.
+        # Only set available=True for NEW bots (no existing row).
+        # For existing bots, only update bot_token — don't clobber assignment state.
+        existing = db.table("bot_pool").select("id, available").eq("bot_username", username).execute()
+        if existing.data:
+            db.table("bot_pool").update({"bot_token": token}).eq("bot_username", username).execute()
+        else:
+            db.table("bot_pool").insert({"bot_username": username, "bot_token": token, "available": True}).execute()
         inserted.append(username)
 
     return {"seeded": inserted, "count": len(inserted)}

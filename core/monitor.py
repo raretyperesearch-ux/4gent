@@ -19,14 +19,14 @@ logger = logging.getLogger(__name__)
 BITQUERY_WS       = "wss://streaming.bitquery.io/graphql_streaming"
 FOURMEME_CONTRACT = "0x5c952063c7fc8610FFDB798152D69F0B9550762b"
 
-# Bitquery API v2 — exact four.meme TokenCreate subscription
+# Bitquery API v2 — exact four.meme TokenCreated subscription
 NEW_TOKEN_SUB = """
 subscription {
   EVM(network: bsc) {
     Events(
       where: {
         Transaction: { To: { is: "%s" } }
-        Log: { Signature: { Name: { is: "TokenCreate" } } }
+        Log: { Signature: { Name: { is: "TokenCreated" } } }
       }
     ) {
       Log {
@@ -74,6 +74,7 @@ class FourMemeMonitor:
         self.api_key = api_key
         self._handlers: list[TokenHandler] = []
         self._running = False
+        self._http = httpx.AsyncClient(timeout=10)  # P-08: shared client, avoids per-event connection overhead
 
     def register(self, handler: TokenHandler) -> None:
         self._handlers.append(handler)
@@ -93,13 +94,16 @@ class FourMemeMonitor:
 
     async def stop(self) -> None:
         self._running = False
+        await self._http.aclose()  # P-08: close shared client on stop
 
     async def _connect(self) -> None:
         # Bitquery API v2 streaming: auth token in URL query param
         ws_url = f"{BITQUERY_WS}?token={self.api_key}"
+        # N-01 fix: Bitquery v2 uses graphql-transport-ws protocol (NOT legacy graphql-ws)
+        # Differences: subprotocol name, "subscribe" vs "start", "next" vs "data", "ping"/"pong" vs "ka"
         async with websockets.connect(
             ws_url,
-            subprotocols=["graphql-ws"],
+            subprotocols=["graphql-transport-ws"],
             ping_interval=30,
             ping_timeout=10,
         ) as ws:
@@ -111,7 +115,7 @@ class FourMemeMonitor:
 
             await ws.send(json.dumps({
                 "id": "4gent-fourmeme",
-                "type": "start",
+                "type": "subscribe",
                 "payload": {"query": NEW_TOKEN_SUB},
             }))
 
@@ -121,12 +125,15 @@ class FourMemeMonitor:
                 if not self._running:
                     break
                 msg = json.loads(raw)
-                if msg.get("type") == "data":
+                if msg.get("type") == "next":          # graphql-transport-ws data message
                     await self._on_data(msg.get("payload", {}))
-                elif msg.get("type") == "ka":
-                    pass  # keepalive — ignore
+                elif msg.get("type") == "ping":        # keepalive — must respond with pong
+                    await ws.send(json.dumps({"type": "pong"}))
                 elif msg.get("type") == "error":
                     logger.error("Bitquery stream error: %s", msg)
+                elif msg.get("type") == "complete":
+                    logger.warning("Bitquery subscription completed unexpectedly — reconnecting")
+                    break
 
     async def _on_data(self, payload: dict) -> None:
         events = payload.get("data", {}).get("EVM", {}).get("Events", [])
@@ -169,18 +176,18 @@ class FourMemeMonitor:
             address = token_data.get("address", "")
             if not address:
                 return token_data
-            async with httpx.AsyncClient(timeout=10) as client:
-                r = await client.get(
-                    "https://four.meme/meme-api/v1/public/token/detail",
-                    params={"address": address},
-                )
-                if r.status_code == 200:
-                    detail = r.json().get("data", {})
-                    token_data["name"]        = detail.get("name", token_data["name"])
-                    token_data["symbol"]      = detail.get("symbol", token_data["symbol"])
-                    token_data["description"] = detail.get("description", "")
-                    token_data["image_url"]   = detail.get("imgUrl", "")
-                    token_data["raise_amount"]= detail.get("raisedAmount", token_data["raise_amount"])
+            # P-08: use shared self._http instead of creating a new client per event
+            r = await self._http.get(
+                "https://four.meme/meme-api/v1/public/token/detail",
+                params={"address": address},
+            )
+            if r.status_code == 200:
+                detail = r.json().get("data", {})
+                token_data["name"]        = detail.get("name", token_data["name"])
+                token_data["symbol"]      = detail.get("symbol", token_data["symbol"])
+                token_data["description"] = detail.get("description", "")
+                token_data["image_url"]   = detail.get("imgUrl", "")
+                token_data["raise_amount"]= detail.get("raisedAmount", token_data["raise_amount"])
         except Exception as e:
             logger.debug("Enrichment failed for %s: %s", token_data.get("address"), e)
         return token_data

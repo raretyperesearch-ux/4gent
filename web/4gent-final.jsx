@@ -81,9 +81,8 @@ const LOGS = [
 const TG_STEPS = [
   "Open Telegram → pencil icon → New Channel",
   "Name it anything. Set visibility to Public.",
-  "Channel Settings → Administrators → Add Admin",
-  "Search @4GentBot → grant Post Messages permission",
   "Copy your channel link and paste it below",
+  "After launch, you'll be shown your assigned bot to add as admin",
 ];
 
 function App() {
@@ -159,33 +158,29 @@ function App() {
 
   async function startLaunch() {
     setLaunching(true); setLogs([]);
-
     const addLog = (msg, ok=false) => setLogs(l => [...l, {msg, ok}]);
 
     try {
       addLog("INITIATING LAUNCH SEQUENCE");
 
-      // Upload image to four.meme CDN — required
-      let imageUrl = "";
-      if (imgFile) {
-        addLog("UPLOADING TOKEN IMAGE TO FOUR.MEME CDN");
-        const fd = new FormData();
-        fd.append("file", imgFile);
-        const upResp = await fetch(`${API_URL}/upload-image`, { method: "POST", body: fd });
-        if (!upResp.ok) {
-          const err = await upResp.json().catch(() => ({}));
-          throw new Error(err.detail || "Image upload failed");
-        }
-        const upJson = await upResp.json();
-        imageUrl = upJson.url;
-        if (!imageUrl || !imageUrl.startsWith("http")) throw new Error("Invalid image URL returned");
-        addLog("IMAGE UPLOADED ✓", true);
-      } else {
-        throw new Error("No image selected");
+      // ── Step 1: Upload image ──────────────────────────────────────────────
+      if (!imgFile) throw new Error("No image selected");
+      addLog("UPLOADING TOKEN IMAGE TO FOUR.MEME CDN");
+      const fd = new FormData();
+      fd.append("file", imgFile);
+      const upResp = await fetch(`${API_URL}/upload-image`, { method: "POST", body: fd });
+      if (!upResp.ok) {
+        const upErr = await upResp.json().catch(() => ({}));
+        throw new Error(upErr.detail || "Image upload failed");
       }
+      const upJson = await upResp.json();
+      const imageUrl = upJson.url;
+      if (!imageUrl?.startsWith("http")) throw new Error("Invalid image URL returned");
+      addLog("IMAGE UPLOADED ✓", true);
 
-      addLog("SUBMITTING TO 4GENT API");
-      const res = await fetch(`${API_URL}/launch`, {
+      // ── Step 2: Prepare — backend fetches createArg + signature ──────────
+      addLog("FETCHING TOKEN CREATION ARGS FROM FOUR.MEME");
+      const prepRes = await fetch(`${API_URL}/launch/prepare`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -197,53 +192,83 @@ function App() {
           tg_channel_link: form.tgLink,
           owner_wallet:    wallet,
           trading_enabled: form.trading,
-          max_trade_bnb:   parseFloat(form.maxTrade) || 0.1,
+          max_trade_bnb:   parseFloat(form.maxTrade)   || 0.1,
           daily_limit_bnb: parseFloat(form.dailyLimit) || 1.0,
-          stop_loss_pct:   parseFloat(form.stopLoss) || 50.0,
+          stop_loss_pct:   parseFloat(form.stopLoss)   || 50.0,
           raise_amount_bnb: parseFloat(form.raiseAmount) || 0,
         }),
       });
-
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.detail || "Launch request failed");
+      if (!prepRes.ok) {
+        const prepErr = await prepRes.json().catch(() => ({}));
+        throw new Error(prepErr.detail || "Prepare failed");
       }
+      const prep = await prepRes.json();
+      setAgentId(prep.agent_id);
+      addLog(`AGENT ID: ${prep.agent_id.slice(0,8).toUpperCase()} ✓`, true);
+      addLog("AWAITING WALLET SIGNATURE — CHECK METAMASK");
 
-      const data = await res.json();
-      setAgentId(data.agent_id);
-      addLog(`AGENT ID: ${data.agent_id.slice(0,8).toUpperCase()}`, true);
+      // ── Step 3: Submit createToken() tx from user's wallet (they pay gas) ─
+      // Calldata is fully encoded by the backend — no ABI encoding risk in JS
+      const activeWallet = wallets?.[0];
+      if (!activeWallet) throw new Error("No wallet connected");
 
-      // Show progress logs while polling
+      // Ensure we're on BSC mainnet (chainId 56)
+      await activeWallet.switchChain(56);
+      const provider = await activeWallet.getEthereumProvider();
+
+      const txHash = await provider.request({
+        method: "eth_sendTransaction",
+        params: [{
+          from:  wallet,
+          to:    prep.contract_address,
+          value: "0x" + BigInt(prep.value_wei).toString(16),
+          data:  prep.calldata,    // ABI-encoded by backend — no manual encoding needed
+          // Gas estimated by wallet
+        }],
+      });
+
+      addLog(`TX SUBMITTED: ${txHash.slice(0,10)}... ✓`, true);
+      addLog("WAITING FOR BSC CONFIRMATION");
+
+      // ── Step 4: Confirm — backend takes over from here ───────────────────
+      const confRes = await fetch(`${API_URL}/launch/confirm/${prep.agent_id}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tx_hash: txHash }),
+      });
+      if (!confRes.ok) {
+        const confErr = await confRes.json().catch(() => ({}));
+        throw new Error(confErr.detail || "Confirm request failed");
+      }
+      addLog("PIPELINE RUNNING — SETTING UP BOT & CHANNEL");
+
+      // ── Step 5: Poll until active ─────────────────────────────────────────
       const progressLogs = [
-        [2000,  "CREATING AGENT WALLET ON BSC",           false],
-        [4000,  "REGISTERING ERC-8004 AGENT NFT",         false],
-        [6000,  "DEPLOYING TOKEN ON FOUR.MEME",           false],
-        [8000,  "WAITING FOR ON-CHAIN CONFIRMATION",      false],
-        [10000, "ASSIGNING TELEGRAM BOT FROM POOL",       false],
-        [11500, "SETTING BOT PROFILE PHOTO",              false],
-        [13000, "VERIFYING CHANNEL ADMIN ACCESS",         false],
-        [14500, "GENERATING INTRO POSTS VIA CLAUDE",      false],
-        [16000, "DISPATCHING POSTS TO CHANNEL",           false],
-        [17000, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",  null],
+        [3000,  "CONFIRMING TX ON BSC",                  false],
+        [8000,  "CREATING AGENT TRADING WALLET",         false],
+        [10000, "REGISTERING ERC-8004 AGENT NFT",        false],
+        [13000, "ASSIGNING TELEGRAM BOT FROM POOL",      false],
+        [15000, "SETTING BOT PROFILE PHOTO",             false],
+        [17000, "VERIFYING CHANNEL ADMIN ACCESS",        false],
+        [19000, "GENERATING INTRO POSTS VIA CLAUDE",     false],
+        [21000, "DISPATCHING POSTS TO CHANNEL",          false],
+        [22000, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", null],
       ];
-
-      // Start progress log display
       let resolved = false;
       progressLogs.forEach(([t, msg, ok]) => {
         setTimeout(() => { if (!resolved) addLog(msg, ok); }, t);
       });
 
-      // Poll real status every 3s
       await new Promise((resolve, reject) => {
         const poll = setInterval(async () => {
           try {
-            const r = await fetch(`${API_URL}/agent/${data.agent_id}`);
+            const r = await fetch(`${API_URL}/agent/${prep.agent_id}`);
             const agent = await r.json();
             if (agent.status === "active") {
               clearInterval(poll);
               resolved = true;
               setLaunchResult(agent);
-              addLog("AGENT ONLINE", true);
+              addLog("AGENT ONLINE ✓", true);
               setTimeout(() => { setLaunching(false); setLaunched(true); setStep(5); }, 600);
               resolve();
             } else if (agent.status === "error") {
@@ -252,13 +277,11 @@ function App() {
             }
           } catch(e) {}
         }, 3000);
-
-        // Timeout after 3 min
-        setTimeout(() => { clearInterval(poll); reject(new Error("Launch timed out")); }, 180000);
+        setTimeout(() => { clearInterval(poll); reject(new Error("Launch timed out")); }, 240000);
       });
 
     } catch(e) {
-      setLogs(l => [...l, { msg: `ERROR: ${e.message}`, ok: false }]);
+      addLog(`ERROR: ${e.message}`, false);
       setTimeout(() => setLaunching(false), 1000);
     }
   }
@@ -521,7 +544,7 @@ function App() {
                         style={{fontFamily:M,fontSize:8,color:"#C0A840",cursor:"pointer",letterSpacing:2,
                           padding:"4px 8px",border:"1px solid #C0A84044",background:"#FDF8E811"}}
                       >
-                        {verifyStatus==="checking" ? "CHECKING..." : verifyStatus==="ok" ? "✓ VERIFIED" : verifyStatus==="fail" ? "✗ NOT FOUND — ADD @4GENTBOT AS ADMIN" : "◈ VERIFY CHANNEL"}
+                        {verifyStatus==="checking" ? "CHECKING..." : verifyStatus==="ok" ? "✓ CHANNEL FOUND" : verifyStatus==="fail" ? "✗ CHANNEL NOT FOUND — CHECK LINK" : "◈ VERIFY CHANNEL"}
                       </div>
                     </div>
                   )}
@@ -772,6 +795,22 @@ function App() {
                   ◈ SHARE t.me/{handle}
                 </div>
               </Card>
+
+              {/* ADD YOUR BOT card — shown if bot_username is known */}
+              {launchResult?.bot_username && (
+                <Card style={{gridColumn:"1/-1",padding:"14px 18px",background:"#F5FDF7",border:"1px solid #B8E4C0"}}>
+                  <div style={{fontFamily:M,fontSize:9,color:"#308050",letterSpacing:2,marginBottom:10}}>◈ ONE LAST STEP — ACTIVATE YOUR AGENT</div>
+                  <div style={{fontFamily:M,fontSize:9,color:"#405848",lineHeight:2}}>
+                    Your agent is live but needs to be added to your channel to start posting.<br/>
+                    <span style={{color:"#308050",fontWeight:700}}>
+                      1. Open your Telegram channel → Administrators → Add Admin<br/>
+                      2. Search <span style={{letterSpacing:1}}>{launchResult.bot_username}</span><br/>
+                      3. Grant Post Messages permission → Done
+                    </span><br/>
+                    <span style={{color:"#90B8A0"}}>Your agent will start posting automatically within 10 minutes.</span>
+                  </div>
+                </Card>
+              )}
 
               <Card style={{display:"flex",flexDirection:"column"}}>
                 <div style={{padding:"10px 14px",borderBottom:"1px solid #F0E8D8"}}>

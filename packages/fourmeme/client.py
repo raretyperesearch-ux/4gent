@@ -111,6 +111,17 @@ class FourMemeClient:
             files={"file": (filename, image_bytes, mime)},
             headers=auth_headers,
         )
+        # Retry once on 401 — session may have expired
+        if resp.status_code == 401:
+            logger.warning("upload got 401 — forcing session refresh and retrying")
+            self.auth._session = None
+            session = await self.auth.get_session()
+            auth_headers = {"meme-web-access": session.access_token}
+            resp = await self._http.post(
+                "/v1/private/token/upload",
+                files={"file": (filename, image_bytes, mime)},
+                headers=auth_headers,
+            )
         resp.raise_for_status()
         data = resp.json()
         self._check(data, "/v1/private/token/upload")
@@ -175,23 +186,40 @@ class FourMemeClient:
             "platform": "MEME",
         }
 
-        payload = {
+        def _valid_https(url: str) -> bool:
+            return url.startswith("https://") if url else False
+
+        payload: dict = {
+            # ── Customisable fields ───────────────────────────────────────────
             "name": name,
             "shortName": short_name,
             "desc": description,
             "imgUrl": img_url,
-            "launchTime": int(time.time() * 1000),
+            "launchTime": int(time.time() * 1000) + 10_000,  # +10s buffer so server processing lag doesn't put it in the past
             "label": label,
             "lpTradingFee": 0.0025,
-            "webUrl": website,
-            "twitterUrl": twitter,
-            "telegramUrl": telegram,
             "preSale": str(pre_sale),
             "onlyMPC": only_mpc,
             "feePlan": fee_plan,
-            "raisedAmount": "24",
+            # ── Fixed params (server-side validated, must be explicit) ────────
+            "symbol": "BNB",
+            "totalSupply": 1000000000,
+            "raisedAmount": 24,
+            "saleRate": "0.8",
+            "reserveRate": 0,
+            "funGroup": False,
+            "clickFun": False,
+            # ── Raised token config ───────────────────────────────────────────
             "raisedToken": raised_token,
         }
+
+        # URL fields must be omitted entirely if not valid https:// URLs
+        if _valid_https(website):
+            payload["webUrl"] = website
+        if _valid_https(twitter):
+            payload["twitterUrl"] = twitter
+        if _valid_https(telegram):
+            payload["telegramUrl"] = telegram
 
         if token_tax_info:
             payload["tokenTaxInfo"] = token_tax_info
@@ -202,6 +230,20 @@ class FourMemeClient:
             json=payload,
             headers=session.headers,
         )
+        # Retry once on 401 — session may have expired before our 1-hour estimate
+        if resp.status_code == 401:
+            logger.warning("create_token got 401 — forcing session refresh and retrying")
+            self.auth._session = None  # force re-login
+            session = await self.auth.get_session()
+            resp = await self._http.post(
+                "/v1/private/token/create",
+                json=payload,
+                headers=session.headers,
+            )
+        if resp.status_code in (401, 403):
+            # P-05: server rejected our auth token — invalidate session so next call re-auths
+            self.auth.invalidate_session()
+            logger.warning("four.meme auth rejected (HTTP %s) — session invalidated", resp.status_code)
         if resp.status_code >= 400:
             logger.error("four.meme create_token error %s: %s", resp.status_code, resp.text)
         resp.raise_for_status()

@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import anthropic
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +74,7 @@ class ClaudeBrain:
         self.custom_prompt = custom_prompt
         self.trading_enabled = trading_enabled
         self.max_trade_bnb = max_trade_bnb
-        self._client = anthropic.Anthropic(
+        self._client = anthropic.AsyncAnthropic(  # O-01: use async client to avoid blocking event loop
             api_key=api_key or os.environ["ANTHROPIC_API_KEY"]
         )
 
@@ -86,17 +87,21 @@ class ClaudeBrain:
             "Respond with valid JSON only. No markdown. No preamble."
         )
 
-    def _call(self, user_msg: str, max_tokens: int = 1024) -> dict:
-        msg = self._client.messages.create(
-            model="claude-sonnet-4-20250514",
+    async def _call(self, user_msg: str, max_tokens: int = 1024) -> dict:
+        """O-01: async Anthropic call. O-03: json.loads inside try. O-07: correct model ID."""
+        msg = await self._client.messages.create(
+            model="claude-sonnet-4-5-20251001",  # O-07: correct model ID
             max_tokens=max_tokens,
             system=self._system(),
             messages=[{"role": "user", "content": user_msg}],
         )
         raw = msg.content[0].text.strip()
-        return json.loads(raw)
+        # O-03: strip markdown fences Claude sometimes adds despite instructions
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        return json.loads(raw)  # inside try in callers
 
-    def evaluate_token(self, token_data: dict, wallet_balance_bnb: float = 0.0) -> TokenEvaluation:
+    async def evaluate_token(self, token_data: dict, wallet_balance_bnb: float = 0.0) -> TokenEvaluation:  # O-01: now async
         """Evaluate a new four.meme token. Decide whether to post and/or trade."""
         prompt = f"""New token launched on four.meme (BSC):
 
@@ -128,7 +133,7 @@ Rules:
 - post_text must sound exactly like your persona"""
 
         try:
-            data = self._call(prompt)
+            data = await self._call(prompt)
             return TokenEvaluation(
                 should_post=bool(data.get("should_post", False)),
                 should_trade=bool(data.get("should_trade", False)) and self.trading_enabled,
@@ -144,7 +149,14 @@ Rules:
                 score=0, reasoning=str(e), post_text=""
             )
 
-    def generate_intro_posts(self) -> list[str]:
+    async def close(self) -> None:
+        """P-08: close the underlying AsyncAnthropic httpx client to prevent resource leak."""
+        try:
+            await self._client.close()
+        except Exception:
+            pass
+
+    async def generate_intro_posts(self) -> list[str]:  # O-01: now async
         """Generate 3 opening posts for channel launch."""
         prompt = """Generate exactly 3 opening Telegram posts for your channel launch.
 
@@ -156,7 +168,7 @@ Match your persona voice exactly. Return JSON:
 {"posts": ["post1", "post2", "post3"]}"""
 
         try:
-            data = self._call(prompt)
+            data = await self._call(prompt)
             posts = data.get("posts", [])
             if len(posts) == 3:
                 return posts

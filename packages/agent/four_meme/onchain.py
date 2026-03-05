@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from web3 import Web3
-from web3.middleware import geth_poa_middleware
+from web3.middleware import ExtraDataToPOAMiddleware  # B-06: geth_poa_middleware removed in web3 v7
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +69,7 @@ class BSCChain:
         gas_price_gwei: float = 3.0,
     ) -> None:
         self.w3 = Web3(Web3.HTTPProvider(rpc_url))
-        self.w3.middleware_onion.inject(geth_poa_middleware, layer=0)
+        self.w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
 
         if not self.w3.is_connected():
             raise ConnectionError(f"Cannot connect to BSC node: {rpc_url}")

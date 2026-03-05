@@ -24,7 +24,18 @@ TOKEN_MANAGER2_ABI = [
         "outputs": [{"internalType": "address", "name": "", "type": "address"}],
         "stateMutability": "payable",
         "type": "function",
-    }
+    },
+    {
+        "anonymous": False,
+        "inputs": [
+            {"indexed": True, "internalType": "address", "name": "token", "type": "address"},
+            {"indexed": True, "internalType": "address", "name": "creator", "type": "address"},
+            {"indexed": False, "internalType": "string", "name": "name", "type": "string"},
+            {"indexed": False, "internalType": "string", "name": "symbol", "type": "string"},
+        ],
+        "name": "TokenCreated",
+        "type": "event",
+    },
 ]
 
 
@@ -102,10 +113,27 @@ class BSCChain:
         return tx_hash.hex()
 
     def wait_for_receipt(self, tx_hash: str, timeout: int = 120) -> dict:
-        """Poll until tx is confirmed, return receipt."""
-        receipt = self._w3.eth.wait_for_transaction_receipt(
-            tx_hash, timeout=timeout
-        )
-        token_address = receipt.get("contractAddress") or receipt["logs"][0].get("address", "")
-        logger.info("Confirmed — token address: %s", token_address)
+        """Poll until tx is confirmed, return receipt dict."""
+        receipt = self._w3.eth.wait_for_transaction_receipt(tx_hash, timeout=timeout)
         return dict(receipt)
+
+    def wait_for_receipt_and_address(self, tx_hash: str, timeout: int = 120) -> tuple[str, str]:
+        """B-08 fix: parse token address from TokenCreated event log.
+        contractAddress is always None for function calls; must decode from logs.
+        Returns (token_address, tx_hash).
+        """
+        receipt = self._w3.eth.wait_for_transaction_receipt(tx_hash, timeout=timeout)
+        if receipt.get("status") == 0:
+            raise RuntimeError(f"Transaction reverted: {tx_hash}")
+        token_address = ""
+        try:
+            logs = self._contract.events.TokenCreated().process_receipt(receipt)
+            if logs:
+                token_address = logs[0]["args"]["token"]
+                logger.info("Token address from TokenCreated event: %s", token_address)
+        except Exception as e:
+            logger.warning("Could not parse TokenCreated event: %s — falling back to first log", e)
+            if receipt.get("logs"):
+                token_address = receipt["logs"][0].get("address", "")
+        logger.info("Confirmed tx=%s token=%s", tx_hash, token_address)
+        return token_address, tx_hash

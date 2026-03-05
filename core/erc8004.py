@@ -61,17 +61,25 @@ async def register_agent_wallet(
     agent_uri = f"https://4gent.io/agents/{agent_id}/metadata.json"
     pk = private_key if private_key.startswith("0x") else f"0x{private_key}"
 
-    tx = contract.functions.register(agent_uri).build_transaction({
-        "from": wallet_address,
-        "nonce": w3.eth.get_transaction_count(wallet_address),
-        "gas": 200_000,
-        "gasPrice": w3.eth.gas_price,
-        "chainId": 56,
-    })
+    # N-03 fix: web3 calls are synchronous (blocking I/O) — run in executor to avoid
+    # blocking the asyncio event loop for up to 120s during tx wait.
+    import asyncio
+    loop = asyncio.get_running_loop()
 
-    signed = w3.eth.account.sign_transaction(tx, pk)
-    tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
-    receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+    def _submit():
+        tx = contract.functions.register(agent_uri).build_transaction({
+            "from": wallet_address,
+            "nonce": w3.eth.get_transaction_count(wallet_address),
+            "gas": 200_000,
+            "gasPrice": w3.eth.gas_price,
+            "chainId": 56,
+        })
+        signed = w3.eth.account.sign_transaction(tx, pk)
+        tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+        receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+        return tx_hash, receipt
+
+    tx_hash, receipt = await loop.run_in_executor(None, _submit)
 
     logger.info("ERC-8004 registered: wallet=%s tx=%s", wallet_address, tx_hash.hex())
     return {
