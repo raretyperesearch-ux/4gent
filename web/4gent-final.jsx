@@ -137,11 +137,15 @@ function App() {
     // If authenticated but no embedded wallet, logout first then re-login
     if (authenticated && !embeddedWallet) {
       console.log("[4gent] authenticated but no embedded wallet — re-logging in");
-      logout().then(() => login());
+      logout().then(() => login({ loginMethods: ["email", "google"] }));
+      return;
+    }
+    if (authenticated && embeddedWallet) {
+      console.log("[4gent] already authenticated with embedded wallet");
       return;
     }
     console.log("[4gent] calling login()");
-    login();
+    login({ loginMethods: ["email", "google"] });
   }
 
   function canNext() {
@@ -870,7 +874,7 @@ export default function FourGent() {
             blockExplorers: { default: { name: "BscScan", url: "https://bscscan.com" } },
           },
         ],
-        loginMethods: ["email", "google"],
+        // loginMethods controlled via dashboard + passed at login() call time
         embeddedWallets: {
           createOnLogin: "all-users",
           requireUserPasswordOnCreate: false,
