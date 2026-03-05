@@ -189,6 +189,7 @@ class FourMemeClient:
             "preSale": str(pre_sale),
             "onlyMPC": only_mpc,
             "feePlan": fee_plan,
+            "raisedAmount": "24",
             "raisedToken": raised_token,
         }
 
