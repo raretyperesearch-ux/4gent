@@ -96,13 +96,15 @@ function App() {
   const [feeAck, setFeeAck]       = useState(false);
   const { login, logout, authenticated, ready } = usePrivy();
   const { wallets } = useWallets();
-  const wallet = wallets?.[0]?.address || null;
+  // Only use Privy embedded wallet — never accept injected wallets (MetaMask/Rabby)
+  const embeddedWallet = wallets?.find(w => w.walletClientType === "privy") || null;
+  const wallet = embeddedWallet?.address || null;
 
-  // Switch to BSC when wallet connects
+  // Switch embedded wallet to BSC — never touch injected wallets
   useEffect(() => {
-    if (!wallets?.[0]) return;
-    wallets[0].switchChain(56).catch(() => {}); // 56 = BSC mainnet
-  }, [wallets?.[0]?.address]);
+    if (!embeddedWallet || embeddedWallet.walletClientType !== "privy") return;
+    embeddedWallet.switchChain(56).catch(() => {});
+  }, [embeddedWallet?.address]);
   const logsRef = useRef(null);
   const fileRef = useRef(null);
 
@@ -128,14 +130,17 @@ function App() {
   }
 
   function connectWallet() {
-    login();
+    // Force Privy modal — never use injected wallet directly
+    if (!authenticated) {
+      login();
+    }
   }
 
   function canNext() {
     if (step===0) return form.name && form.ticker && form.archetype;
     if (step===1) return form.prompt.length > 5 && (imgMode==="ai" || imgFile);
     if (step===2) return form.tgLink.length > 5;
-    if (step===4) return wallet && feeAck;
+    if (step===4) return authenticated && wallet && feeAck;
     return true;
   }
 
@@ -374,7 +379,7 @@ function App() {
             {launched&&<div style={{fontFamily:M,fontSize:7,color:"#5DB870",marginTop:3}}>● LIVE</div>}
           </div>}
 
-          {wallet&&<div style={{padding:"8px 10px",border:"1px solid #E8D898",background:"#FDF8E8"}}>
+          {authenticated&&wallet&&<div style={{padding:"8px 10px",border:"1px solid #E8D898",background:"#FDF8E8"}}>
             <div style={{fontFamily:M,fontSize:7,color:"#B09030",marginBottom:3,letterSpacing:2}}>WALLET</div>
             <div style={{fontFamily:M,fontSize:8,color:"#808030"}}>{wallet.slice(0,6)}...{wallet.slice(-4)}</div>
           </div>}
@@ -620,17 +625,25 @@ function App() {
 
               {/* WALLET CONNECT */}
               <div>
-                <Label>01 — CONNECT YOUR BSC WALLET</Label>
-                {!wallet
+                <Label>01 — CONNECT YOUR WALLET FOR FEE PAYOUTS</Label>
+                {!ready
+                  ? <div style={{padding:"13px",border:"1px solid #E0D8C8",fontFamily:M,fontSize:9,color:"#A89868",letterSpacing:2}}>LOADING...</div>
+                  : !authenticated || !wallet
                   ? <button onClick={connectWallet} className="nb" style={{
                       width:"100%",padding:"13px",background:"#FEFCF5",
                       border:`1px solid ${G}`,color:G,fontFamily:M,fontSize:11,letterSpacing:4,
-                    }}>◈ CONNECT WALLET</button>
-                  : <div style={{padding:"11px 14px",border:"1px solid #5DB870",background:"rgba(93,184,112,0.05)",display:"flex",alignItems:"center",gap:10}}>
-                      <div className="pd" style={{width:7,height:7,borderRadius:"50%",background:"#5DB870",flexShrink:0}}/>
-                      <div style={{fontFamily:M,fontSize:9,color:"#408050"}}>CONNECTED — {wallet.slice(0,6)}...{wallet.slice(-4)}</div>
+                    }}>◈ CONNECT WITH EMAIL / GOOGLE</button>
+                  : <div style={{padding:"11px 14px",border:"1px solid #5DB870",background:"rgba(93,184,112,0.05)",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+                      <div style={{display:"flex",alignItems:"center",gap:10}}>
+                        <div className="pd" style={{width:7,height:7,borderRadius:"50%",background:"#5DB870",flexShrink:0}}/>
+                        <div style={{fontFamily:M,fontSize:9,color:"#408050"}}>PRIVY WALLET — {wallet.slice(0,6)}...{wallet.slice(-4)}</div>
+                      </div>
+                      <div style={{fontFamily:M,fontSize:7,color:"#A89868",letterSpacing:1}}>1% FEE RECIPIENT</div>
                     </div>
                 }
+                <div style={{fontFamily:M,fontSize:7,color:"#A89868",marginTop:5,letterSpacing:1,lineHeight:1.6}}>
+                  YOUR WALLET RECEIVES 1% OF ALL POST-GRADUATION TRADING FEES. NO GAS REQUIRED — DEPLOY IS SERVER-SIDE.
+                </div>
               </div>
 
               {/* CONFIG REVIEW */}
@@ -828,7 +841,8 @@ export default function FourGent() {
         appearance: {
           theme: "dark",
           accentColor: "#C9A84C",
-          logo: "https://4gent.io/logo.png",
+          logo: "https://4gent-io1u.vercel.app/logo.png",
+          walletList: [],
         },
         defaultChain: {
           id: 56,
@@ -848,9 +862,12 @@ export default function FourGent() {
             blockExplorers: { default: { name: "BscScan", url: "https://bscscan.com" } },
           },
         ],
-        loginMethods: ["wallet", "email", "google"],
+        loginMethods: ["email", "google"],
         embeddedWallets: {
-          createOnLogin: "users-without-wallets",
+          createOnLogin: "all-users",
+          requireUserPasswordOnCreate: false,
+          showWalletUiOnConnect: false,
+          noPromptOnSignature: false,
         },
       }}
     >
