@@ -82,23 +82,18 @@ async def _deploy_token(config: LaunchConfig, wallet_address: str, private_key: 
         rpc_url=os.environ.get("BSC_RPC_URL", "https://bsc-dataseed1.binance.org/"),
     )
 
-    try:
-        # Upload image to four.meme CDN if it's a local path, else use URL directly
-        import httpx as _httpx
-        if config.image_url.startswith("http"):
-            img_url = config.image_url
-        else:
-            img_url = await client.upload_image(config.image_url)
+    # Validate image_url is a proper URL (not base64 or placeholder)
+    if not config.image_url.startswith("http"):
+        raise ValueError(f"image_url must be a CDN URL, got: {config.image_url[:50]}")
 
+    try:
         create_result = await client.create_token(
             name=config.name,
             symbol=config.ticker,
             description=config.prompt[:200],
-            img_url=img_url,
-            presale_bnb=config.raise_amount_bnb,
+            img_url=config.image_url,
+            raised_amount=config.raise_amount_bnb,
             telegram=config.tg_channel_link,
-            creator_wallet=config.owner_wallet,
-            label="AI",
         )
         tx_hash = chain.submit_create_token(
             create_arg=create_result["createArg"],
@@ -201,33 +196,8 @@ async def launch_agent(config: LaunchConfig) -> LaunchResult:
                 }).execute()
                 logger.info("[%s] Intro post %d/3 sent", config.name, i + 1)
 
-        # 8. Spawn OpenFang autonomous agent
-        logger.info("[%s] Step 8/9 — Spawning OpenFang agent", config.name)
-        from .openfang_client import OpenfangClient
-        of_client = OpenfangClient()
-        of_id = await of_client.spawn_agent(
-            agent_id=config.agent_id,
-            name=config.name,
-            ticker=config.ticker,
-            archetype=config.archetype,
-            mission=config.prompt,
-            telegram_bot_token=bot["bot_token"],
-            telegram_channel_id=config.tg_channel_link,
-        )
-        if of_id:
-            await _update_agent(supabase, config.agent_id, openfang_id=of_id)
-            await of_client.notify_token_launch(
-                agent_id=of_id,
-                token_address=token_address,
-                token_name=config.name,
-                ticker=config.ticker,
-            )
-            logger.info("[%s] OpenFang agent live: %s", config.name, of_id)
-        else:
-            logger.warning("[%s] OpenFang spawn failed — agent active but not autonomous", config.name)
-
-        # 9. Claim code + finalize
-        logger.info("[%s] Step 9/9 — Finalizing", config.name)
+        # 8. Claim code + finalize
+        logger.info("[%s] Step 8/8 — Finalizing", config.name)
         claim_code = _generate_claim_code()
         result.claim_code = claim_code
         await _update_agent(supabase, config.agent_id,
@@ -237,7 +207,7 @@ async def launch_agent(config: LaunchConfig) -> LaunchResult:
                             last_active_at=datetime.utcnow().isoformat())
 
         result.success = True
-        logger.info("[%s] LAUNCH COMPLETE ✓ token=%s of_id=%s", config.name, token_address, of_id)
+        logger.info("[%s] LAUNCH COMPLETE ✓ token=%s", config.name, token_address)
         return result
 
     except Exception as e:
