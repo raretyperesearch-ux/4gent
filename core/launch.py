@@ -89,10 +89,10 @@ async def _deploy_token(config: LaunchConfig, wallet_address: str, private_key: 
     try:
         create_result = await client.create_token(
             name=config.name,
-            symbol=config.ticker,
+            short_name=config.ticker,
             description=config.prompt[:200],
             img_url=config.image_url,
-            raised_amount=config.raise_amount_bnb,
+            pre_sale=config.raise_amount_bnb,
             telegram=config.tg_channel_link,
         )
         tx_hash = chain.submit_create_token(
