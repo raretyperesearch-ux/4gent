@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import { PrivyProvider, usePrivy, useWallets } from "@privy-io/react-auth";
+import { PrivyProvider, usePrivy, useWallets, useConnectWallet } from "@privy-io/react-auth";
 
 const API_URL = typeof process !== "undefined" && process.env?.NEXT_PUBLIC_API_URL
   ? process.env.NEXT_PUBLIC_API_URL
@@ -97,9 +97,10 @@ function App() {
   const [imgPreview, setImgPreview] = useState(null);
   const [feeAck, setFeeAck]       = useState(false);
   const { login, logout, authenticated, ready } = usePrivy();
+  const { connectWallet: privyConnectWallet } = useConnectWallet();
   const { wallets } = useWallets();
-  // Only count wallet as connected if Privy authenticated it
-  const embeddedWallet = authenticated ? (wallets?.[0] || null) : null;
+  // Any connected wallet (MetaMask, Rabby etc.) — connectWallet populates wallets[]
+  const embeddedWallet = wallets?.[0] || null;
   const wallet = embeddedWallet?.address || null;
 
   // Switch to BSC when wallet connects
@@ -131,17 +132,24 @@ function App() {
     const r = new FileReader(); r.onload = ev => setImgPreview(ev.target.result); r.readAsDataURL(f);
   }
 
-  function connectWallet() {
+  async function connectWallet() {
     if (!ready) return;
-    if (authenticated) { logout(); return; } // allow disconnect
-    login({ loginMethods: ["wallet"] });
+    if (wallet) return; // already connected
+    // Step 1: connect the wallet (populates wallets[])
+    // Step 2: loginOrLink authenticates it (sets authenticated=true)
+    await privyConnectWallet({
+      onSuccess: async (connectedWallet) => {
+        // wallet is now in wallets[] — authenticate it
+        try { await connectedWallet.loginOrLink(); } catch(e) {}
+      }
+    });
   }
 
   function canNext() {
     if (step===0) return form.name && form.ticker && form.archetype;
     if (step===1) return form.prompt.length > 5 && (imgMode==="ai" || imgFile);
     if (step===2) return form.tgLink.length > 5;
-    if (step===4) return authenticated && wallet && feeAck;
+    if (step===4) return wallet && feeAck;
     return true;
   }
 
@@ -380,7 +388,7 @@ function App() {
             {launched&&<div style={{fontFamily:M,fontSize:7,color:"#5DB870",marginTop:3}}>● LIVE</div>}
           </div>}
 
-          {authenticated&&wallet&&<div style={{padding:"8px 10px",border:"1px solid #E8D898",background:"#FDF8E8"}}>
+          {wallet&&<div style={{padding:"8px 10px",border:"1px solid #E8D898",background:"#FDF8E8"}}>
             <div style={{fontFamily:M,fontSize:7,color:"#B09030",marginBottom:3,letterSpacing:2}}>WALLET</div>
             <div style={{fontFamily:M,fontSize:8,color:"#808030"}}>{wallet.slice(0,6)}...{wallet.slice(-4)}</div>
           </div>}
@@ -629,7 +637,7 @@ function App() {
                 <Label>01 — CONNECT YOUR BSC WALLET</Label>
                 {!ready
                   ? <div style={{padding:"13px",border:"1px solid #E0D8C8",fontFamily:M,fontSize:9,color:"#A89868",letterSpacing:2}}>LOADING...</div>
-                  : !authenticated || !wallet
+                  : !wallet
                   ? <button onClick={connectWallet} disabled={!ready} className="nb" style={{
                       width:"100%",padding:"13px",background:"#FEFCF5",
                       border:`1px solid ${G}`,color:ready?G:"#C0B880",fontFamily:M,fontSize:11,letterSpacing:4,
