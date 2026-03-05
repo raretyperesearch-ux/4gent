@@ -21,29 +21,6 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://four.meme/meme-api"
 
-# Fixed raisedToken config per official docs
-# (query /v1/public/config for live values if needed)
-RAISED_TOKEN_BNB = {
-    "symbol": "BNB",
-    "nativeSymbol": "BNB",
-    "symbolAddress": "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c",
-    "deployCost": "0",
-    "buyFee": "0.01",
-    "sellFee": "0.01",
-    "minTradeFee": "0",
-    "b0Amount": "8",
-    "totalBAmount": "24",
-    "totalAmount": "1000000000",
-    "logoUrl": "https://static.four.meme/market/68b871b6-96f7-408c-b8d0-388d804b34275092658264263839640.png",
-    "tradeLevel": ["0.1", "0.5", "1"],
-    "status": "PUBLISH",
-    "buyTokenLink": "https://pancakeswap.finance/swap",
-    "reservedNumber": 10,
-    "saleRate": "0.8",
-    "networkCode": "BSC",
-    "platform": "MEME",
-}
-
 
 class FourMemeError(Exception):
     def __init__(self, code: int, message: str, endpoint: str = "") -> None:
@@ -85,11 +62,41 @@ class FourMemeClient:
     # ── Public ────────────────────────────────────────────────────────────────
 
     async def get_public_config(self) -> dict:
-        """Fetch platform config including raisedToken options."""
+        """Fetch platform config including live raisedToken options."""
         resp = await self._http.get("/v1/public/config")
         resp.raise_for_status()
-        data = resp.json()
-        return data.get("data", {})
+        return resp.json().get("data", {})
+
+    async def _get_raised_token_bnb(self) -> dict:
+        """Fetch live BNB raisedToken config from /v1/public/config."""
+        config = await self.get_public_config()
+        raised_tokens = config.get("raisedTokens") or config.get("raisedTokenList") or []
+        for token in raised_tokens:
+            if token.get("symbol") == "BNB" or token.get("nativeSymbol") == "BNB":
+                logger.info("Live raisedToken BNB config fetched: %s", token)
+                return token
+        # Fallback to known-good values if config shape changes
+        logger.warning("Could not find BNB in /v1/public/config raisedTokens — using fallback")
+        return {
+            "symbol": "BNB",
+            "nativeSymbol": "BNB",
+            "symbolAddress": "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c",
+            "deployCost": "0",
+            "buyFee": "0.01",
+            "sellFee": "0.01",
+            "minTradeFee": "0",
+            "b0Amount": "8",
+            "totalBAmount": "24",
+            "totalAmount": "1000000000",
+            "logoUrl": "https://static.four.meme/market/68b871b6-96f7-408c-b8d0-388d804b34275092658264263839640.png",
+            "tradeLevel": ["0.1", "0.5", "1"],
+            "status": "PUBLISH",
+            "buyTokenLink": "https://pancakeswap.finance/swap",
+            "reservedNumber": 10,
+            "saleRate": "0.8",
+            "networkCode": "BSC",
+            "platform": "MEME",
+        }
 
     # ── Private ───────────────────────────────────────────────────────────────
 
@@ -178,6 +185,7 @@ class FourMemeClient:
             {"createArg": "0x...", "signature": "0x..."}
         """
         session = await self.auth.get_session()
+        raised_token = await self._get_raised_token_bnb()
 
         payload = {
             "name": name,
@@ -193,17 +201,20 @@ class FourMemeClient:
             "preSale": str(pre_sale),
             "onlyMPC": only_mpc,
             "feePlan": fee_plan,
-            "raisedToken": RAISED_TOKEN_BNB,
+            "raisedToken": raised_token,
         }
 
         if token_tax_info:
             payload["tokenTaxInfo"] = token_tax_info
 
+        logger.info("create_token payload: %s", payload)
         resp = await self._http.post(
             "/v1/private/token/create",
             json=payload,
             headers=session.headers,
         )
+        if resp.status_code >= 400:
+            logger.error("four.meme create_token error %s: %s", resp.status_code, resp.text)
         resp.raise_for_status()
         data = resp.json()
         self._check(data, "/v1/private/token/create")
