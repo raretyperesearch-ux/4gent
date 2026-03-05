@@ -17,11 +17,9 @@ from typing import Optional
 from dotenv import load_dotenv
 load_dotenv()
 
-import httpx
 
 
-
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from supabase import create_client, Client
@@ -145,27 +143,37 @@ async def health():
     }
 
 
-@app.get("/test-fourmeme-auth")
-async def test_fourmeme_auth():
-    """Test if four.meme nonce endpoint is reachable from Railway."""
+@app.post("/upload-image")
+async def upload_image(file: UploadFile = File(...)):
+    """
+    Upload token image to four.meme CDN.
+    Frontend sends the file, we proxy it to four.meme and return the CDN URL.
+    Called BEFORE /launch so image_url in LaunchRequest is always a real CDN URL.
+    """
+    import sys, os
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "packages", "fourmeme"))
+    from fourmeme.auth import FourMemeAuth
+    from fourmeme.client import FourMemeClient
+
+    # We use the platform wallet to authenticate the upload
+    platform_key = os.environ.get("PLATFORM_FEE_WALLET_KEY", "")
+    if not platform_key:
+        raise HTTPException(status_code=500, detail="PLATFORM_FEE_WALLET_KEY not set")
+
+    image_bytes = await file.read()
+    mime = file.content_type or "image/png"
+    filename = file.filename or "token.png"
+
+    auth = FourMemeAuth(private_key=platform_key)
+    client = FourMemeClient(auth)
     try:
-        async with httpx.AsyncClient(timeout=10, headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Referer": "https://four.meme/",
-            "Origin": "https://four.meme",
-            "Accept": "application/json",
-        }) as client:
-            resp = await client.post(
-                "https://four.meme/meme-api/v1/private/user/nonce/generate",
-                json={
-                    "accountAddress": "0x0000000000000000000000000000000000000001",
-                    "verifyType": "LOGIN",
-                    "networkCode": "BSC"
-                }
-            )
-            return {"status_code": resp.status_code, "body": resp.text[:500]}
+        cdn_url = await client.upload_image_bytes(image_bytes, mime=mime, filename=filename)
+        return {"url": cdn_url}
     except Exception as e:
-        return {"error": str(e)}
+        logger.error("Image upload failed: %s", e)
+        raise HTTPException(status_code=500, detail=f"Image upload failed: {str(e)}")
+    finally:
+        await client.close()
 
 
 @app.post("/launch", response_model=LaunchResponse)
