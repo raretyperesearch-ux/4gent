@@ -128,9 +128,5 @@ class FourMemeAuth:
         """P-05: Force re-authentication on next get_session() call. Call on 401/403 responses."""
         self._session = None
 
-    def invalidate_session(self) -> None:
-        """P-05: Call this on 401/403 response to force re-authentication on next get_session()."""
-        self._session = None
-
     async def close(self) -> None:
         await self._http.aclose()
