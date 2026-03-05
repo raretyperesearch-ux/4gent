@@ -139,7 +139,9 @@ async def prepare_launch(config: LaunchConfig) -> PrepareResult:
         arg2 = bytes.fromhex(create_result["signature"].removeprefix("0x"))
         calldata = "0x" + selector.hex() + abi_encode(["bytes", "bytes"], [arg1, arg2]).hex()
 
-        value_wei = str(Web3.to_wei(config.raise_amount_bnb, "ether"))
+        # 0.02 BNB is the fixed deploy fee required by four.meme contract + any presale amount on top
+        DEPLOY_FEE_BNB = 0.02
+        value_wei = str(Web3.to_wei(config.raise_amount_bnb + DEPLOY_FEE_BNB, "ether"))
 
         await _update_agent(supabase, config.agent_id, status="awaiting_tx")
 
