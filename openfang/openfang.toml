@@ -1,0 +1,30 @@
+# 4Gent — OpenFang Agent OS Config
+# Runs as a second Railway service alongside FastAPI backend
+# Each deployed agent gets its own OpenFang agent instance via the REST API
+
+api_listen = "0.0.0.0:4200"
+api_key = "${OPENFANG_API_KEY}"
+
+[default_model]
+provider = "anthropic"
+model = "claude-sonnet-4-5-20251001"
+max_tokens = 1024
+temperature = 0.85
+
+[memory]
+decay_rate = 0.03
+
+[providers.anthropic]
+api_key_env = "ANTHROPIC_API_KEY"
+
+[agents.defaults]
+model = "claude-sonnet-4-5-20251001"
+temperature = 0.85
+max_tokens = 1024
+
+# Telegram channel adapter
+# Each agent instance will be configured with its own bot token at runtime
+# via the OpenFang REST API — this is the base config
+[channels.telegram]
+enabled = true
+token = "${PLATFORM_BOT_TOKEN}"
