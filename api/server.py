@@ -146,34 +146,33 @@ async def health():
 @app.post("/upload-image")
 async def upload_image(file: UploadFile = File(...)):
     """
-    Upload token image to four.meme CDN.
-    Frontend sends the file, we proxy it to four.meme and return the CDN URL.
-    Called BEFORE /launch so image_url in LaunchRequest is always a real CDN URL.
+    Upload token image to four.meme CDN via their official API.
+    Requires WALLET_PRIVATE_KEY env var (same wallet used for token creation).
+    Returns four.meme CDN URL required by create_token imgUrl field.
     """
-    import sys, os
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "packages", "fourmeme"))
+    import sys, os as _os
+    sys.path.insert(0, _os.path.join(_os.path.dirname(__file__), "..", "packages", "fourmeme"))
     from fourmeme.auth import FourMemeAuth
     from fourmeme.client import FourMemeClient
 
-    # We use the platform wallet to authenticate the upload
-    platform_key = os.environ.get("PLATFORM_FEE_WALLET_KEY", "")
-    if not platform_key:
-        raise HTTPException(status_code=500, detail="PLATFORM_FEE_WALLET_KEY not set")
+    private_key = os.environ.get("WALLET_PRIVATE_KEY", "")
+    if not private_key:
+        raise HTTPException(status_code=500, detail="WALLET_PRIVATE_KEY not set")
 
     image_bytes = await file.read()
     mime = file.content_type or "image/png"
     filename = file.filename or "token.png"
 
-    auth = FourMemeAuth(private_key=platform_key)
-    client = FourMemeClient(auth)
     try:
-        cdn_url = await client.upload_image_bytes(image_bytes, mime=mime, filename=filename)
+        auth = FourMemeAuth(private_key=private_key)
+        client = FourMemeClient(auth)
+        cdn_url = await client.upload_image_bytes(image_bytes, filename=filename, mime=mime)
+        await client.close()
+        logger.info("Image uploaded to four.meme CDN: %s", cdn_url)
         return {"url": cdn_url}
     except Exception as e:
         logger.error("Image upload failed: %s", e)
         raise HTTPException(status_code=500, detail=f"Image upload failed: {str(e)}")
-    finally:
-        await client.close()
 
 
 @app.post("/launch", response_model=LaunchResponse)
