@@ -201,8 +201,33 @@ async def launch_agent(config: LaunchConfig) -> LaunchResult:
                 }).execute()
                 logger.info("[%s] Intro post %d/3 sent", config.name, i + 1)
 
-        # 8. Claim code + finalize
-        logger.info("[%s] Step 8/8 — Finalizing", config.name)
+        # 8. Spawn OpenFang autonomous agent
+        logger.info("[%s] Step 8/9 — Spawning OpenFang agent", config.name)
+        from .openfang_client import OpenfangClient
+        of_client = OpenfangClient()
+        of_id = await of_client.spawn_agent(
+            agent_id=config.agent_id,
+            name=config.name,
+            ticker=config.ticker,
+            archetype=config.archetype,
+            mission=config.prompt,
+            telegram_bot_token=bot["bot_token"],
+            telegram_channel_id=config.tg_channel_link,
+        )
+        if of_id:
+            await _update_agent(supabase, config.agent_id, openfang_id=of_id)
+            await of_client.notify_token_launch(
+                agent_id=of_id,
+                token_address=token_address,
+                token_name=config.name,
+                ticker=config.ticker,
+            )
+            logger.info("[%s] OpenFang agent live: %s", config.name, of_id)
+        else:
+            logger.warning("[%s] OpenFang spawn failed — agent active but not autonomous", config.name)
+
+        # 9. Claim code + finalize
+        logger.info("[%s] Step 9/9 — Finalizing", config.name)
         claim_code = _generate_claim_code()
         result.claim_code = claim_code
         await _update_agent(supabase, config.agent_id,
@@ -212,7 +237,7 @@ async def launch_agent(config: LaunchConfig) -> LaunchResult:
                             last_active_at=datetime.utcnow().isoformat())
 
         result.success = True
-        logger.info("[%s] LAUNCH COMPLETE ✓ token=%s", config.name, token_address)
+        logger.info("[%s] LAUNCH COMPLETE ✓ token=%s of_id=%s", config.name, token_address, of_id)
         return result
 
     except Exception as e:
