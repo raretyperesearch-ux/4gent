@@ -28,6 +28,9 @@ from core.launch import launch_agent, LaunchConfig
 from core.monitor import FourMemeMonitor
 from core.scheduler import AgentScheduler, AgentRuntime
 from core.telegram import handle_owner_command
+from core.openfang_client import OpenFangClient
+
+openfang = OpenFangClient()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -52,6 +55,17 @@ def get_db() -> Client:
     return supabase_client
 
 
+async def _forward_token_to_openfang(token_data: dict) -> None:
+    """Forward new token events to all active OpenFang agents."""
+    db = get_db()
+    active = db.table("agents").select("id").eq("status", "active").execute()
+    if active.data:
+        await asyncio.gather(
+            *[openfang.notify_token_launch(a["id"], token_data) for a in active.data],
+            return_exceptions=True,
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup: load agents from DB, start Bitquery monitor."""
@@ -68,6 +82,7 @@ async def lifespan(app: FastAPI):
     if bitquery_key:
         monitor = FourMemeMonitor(api_key=bitquery_key)
         monitor.register(scheduler.on_token_event)
+        monitor.register(_forward_token_to_openfang)
         asyncio.create_task(monitor.start())
         logger.info("four.meme monitor started")
     else:
@@ -222,6 +237,23 @@ async def _run_launch(config: LaunchConfig) -> None:
             scheduler.register(runtime)
             if monitor:
                 monitor.register(runtime.handle_new_token)
+
+            # Spawn autonomous OpenFang agent instance
+            of_id = await openfang.spawn_agent(
+                agent_id=agent["id"],
+                name=agent["name"],
+                ticker=agent["ticker"],
+                archetype=agent["archetype"],
+                mission=agent["prompt"],
+                telegram_bot_token=agent["bot_token"],
+                telegram_channel_id=agent["tg_channel_link"],
+            )
+            if of_id:
+                db.table("agents").update({"openfang_id": of_id}).eq("id", agent["id"]).execute()
+                logger.info("OpenFang agent spawned: %s → %s", agent["name"], of_id)
+            else:
+                logger.warning("OpenFang spawn failed for %s — agent still active via scheduler", agent["id"])
+
         logger.info("Agent %s launched and registered in scheduler", config.agent_id)
     else:
         logger.error("Launch failed for %s: %s", config.agent_id, result.error)
@@ -272,6 +304,7 @@ async def pause_agent(agent_id: str):
     if not runtime:
         raise HTTPException(status_code=404, detail="Agent not running")
     await runtime.pause()
+    await openfang.pause_agent(agent_id)
     return {"status": "paused"}
 
 
@@ -281,6 +314,7 @@ async def resume_agent(agent_id: str):
     if not runtime:
         raise HTTPException(status_code=404, detail="Agent not running")
     await runtime.resume()
+    await openfang.resume_agent(agent_id)
     return {"status": "active"}
 
 
