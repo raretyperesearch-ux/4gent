@@ -98,13 +98,13 @@ function App() {
   const [feeAck, setFeeAck]       = useState(false);
   const { login, logout, authenticated, ready } = usePrivy();
   const { wallets } = useWallets();
-  // Only use Privy embedded wallet — never accept injected wallets (MetaMask/Rabby)
-  const embeddedWallet = wallets?.find(w => w.walletClientType === "privy") || null;
+  // Only count wallet as connected if Privy authenticated it
+  const embeddedWallet = authenticated ? (wallets?.[0] || null) : null;
   const wallet = embeddedWallet?.address || null;
 
-  // Switch embedded wallet to BSC — never touch injected wallets
+  // Switch to BSC when wallet connects
   useEffect(() => {
-    if (!embeddedWallet || embeddedWallet.walletClientType !== "privy") return;
+    if (!embeddedWallet) return;
     embeddedWallet.switchChain(56).catch(() => {});
   }, [embeddedWallet?.address]);
   const logsRef = useRef(null);
@@ -132,20 +132,9 @@ function App() {
   }
 
   function connectWallet() {
-    console.log("[4gent] connectWallet clicked — ready:", ready, "authenticated:", authenticated, "embeddedWallet:", embeddedWallet?.address);
-    if (!ready) { console.log("[4gent] Privy not ready yet"); return; }
-    // If authenticated but no embedded wallet, logout first then re-login
-    if (authenticated && !embeddedWallet) {
-      console.log("[4gent] authenticated but no embedded wallet — re-logging in");
-      logout().then(() => login({ loginMethods: ["email", "google"] }));
-      return;
-    }
-    if (authenticated && embeddedWallet) {
-      console.log("[4gent] already authenticated with embedded wallet");
-      return;
-    }
-    console.log("[4gent] calling login()");
-    login({ loginMethods: ["email", "google"] });
+    if (!ready) return;
+    if (authenticated) { logout(); return; } // allow disconnect
+    login({ loginMethods: ["wallet"] });
   }
 
   function canNext() {
@@ -637,7 +626,7 @@ function App() {
 
               {/* WALLET CONNECT */}
               <div>
-                <Label>01 — CONNECT YOUR WALLET FOR FEE PAYOUTS</Label>
+                <Label>01 — CONNECT YOUR BSC WALLET</Label>
                 {!ready
                   ? <div style={{padding:"13px",border:"1px solid #E0D8C8",fontFamily:M,fontSize:9,color:"#A89868",letterSpacing:2}}>LOADING...</div>
                   : !authenticated || !wallet
@@ -645,17 +634,17 @@ function App() {
                       width:"100%",padding:"13px",background:"#FEFCF5",
                       border:`1px solid ${G}`,color:ready?G:"#C0B880",fontFamily:M,fontSize:11,letterSpacing:4,
                       opacity:ready?1:0.5,cursor:ready?"pointer":"wait",
-                    }}>{ready ? "◈ CONNECT WITH EMAIL / GOOGLE" : "LOADING..."}</button>
+                    }}>{ready ? "◈ CONNECT WALLET" : "LOADING..."}</button>
                   : <div style={{padding:"11px 14px",border:"1px solid #5DB870",background:"rgba(93,184,112,0.05)",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
                       <div style={{display:"flex",alignItems:"center",gap:10}}>
                         <div className="pd" style={{width:7,height:7,borderRadius:"50%",background:"#5DB870",flexShrink:0}}/>
-                        <div style={{fontFamily:M,fontSize:9,color:"#408050"}}>PRIVY WALLET — {wallet.slice(0,6)}...{wallet.slice(-4)}</div>
+                        <div style={{fontFamily:M,fontSize:9,color:"#408050"}}>{wallet.slice(0,6)}...{wallet.slice(-4)}</div>
                       </div>
-                      <div style={{fontFamily:M,fontSize:7,color:"#A89868",letterSpacing:1}}>1% FEE RECIPIENT</div>
+                      
                     </div>
                 }
                 <div style={{fontFamily:M,fontSize:7,color:"#A89868",marginTop:5,letterSpacing:1,lineHeight:1.6}}>
-                  YOUR WALLET RECEIVES 1% OF ALL POST-GRADUATION TRADING FEES. NO GAS REQUIRED — DEPLOY IS SERVER-SIDE.
+                  YOUR WALLET ADDRESS IS USED AS THE 1% FEE RECIPIENT ON ALL POST-GRADUATION TRADES.
                 </div>
               </div>
 
@@ -854,7 +843,7 @@ export default function FourGent() {
         appearance: {
           theme: "dark",
           accentColor: "#C9A84C",
-          walletList: [],
+
         },
         defaultChain: {
           id: 56,
@@ -875,11 +864,7 @@ export default function FourGent() {
           },
         ],
         // loginMethods controlled via dashboard + passed at login() call time
-        embeddedWallets: {
-          createOnLogin: "all-users",
-          requireUserPasswordOnCreate: false,
-          noPromptOnSignature: false,
-        },
+
       }}
     >
       <App />
