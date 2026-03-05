@@ -1,6 +1,6 @@
 """
 four.meme authentication — nonce + wallet signature login flow.
-Updated to use new /private endpoints (Feb 2026 API).
+Updated Feb 2026 API endpoints.
 """
 from __future__ import annotations
 
@@ -14,6 +14,13 @@ from eth_account.messages import encode_defunct
 
 BASE_URL = "https://four.meme/meme-api"
 
+BROWSER_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Referer": "https://four.meme/",
+    "Origin": "https://four.meme",
+    "Accept": "application/json, text/plain, */*",
+}
+
 
 @dataclass
 class Session:
@@ -25,6 +32,7 @@ class Session:
         return {
             "meme-web-access": self.access_token,
             "Content-Type": "application/json",
+            **BROWSER_HEADERS,
         }
 
     def is_expired(self) -> bool:
@@ -35,7 +43,7 @@ class FourMemeAuth:
     """
     Handles wallet-based login to four.meme.
 
-    Login flow (updated Feb 2026):
+    Login flow (Feb 2026):
       1. POST /v1/private/user/nonce/generate  -> nonce string
       2. Sign "You are sign in Meme {nonce}" with private key
       3. POST /v1/private/user/login/dex       -> accessToken
@@ -47,12 +55,7 @@ class FourMemeAuth:
         self._http = httpx.AsyncClient(
             base_url=BASE_URL,
             timeout=30,
-            headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                "Referer": "https://four.meme/",
-                "Origin": "https://four.meme",
-                "Accept": "application/json, text/plain, */*",
-            }
+            headers=BROWSER_HEADERS,
         )
         self._session: Session | None = None
 
@@ -66,7 +69,7 @@ class FourMemeAuth:
             json={
                 "accountAddress": self.address,
                 "verifyType": "LOGIN",
-                "networkCode": "BSC"
+                "networkCode": "BSC",
             },
         )
         resp.raise_for_status()
@@ -86,15 +89,16 @@ class FourMemeAuth:
                     "address": self.address,
                     "networkCode": "BSC",
                     "signature": signed.signature.hex(),
-                    "verifyType": "LOGIN"
+                    "verifyType": "LOGIN",
                 },
-                "walletName": "MetaMask"
+                "walletName": "MetaMask",
             },
         )
         resp.raise_for_status()
         data = resp.json()["data"]
+        token = data if isinstance(data, str) else data.get("accessToken", "")
         return Session(
-            access_token=data if isinstance(data, str) else data.get("accessToken"),
+            access_token=token,
             expires_at=time.time() + 3600,
         )
 

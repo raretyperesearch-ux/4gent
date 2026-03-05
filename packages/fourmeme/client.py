@@ -1,19 +1,45 @@
 """
-four.meme REST API client — token creation, image upload, market data.
+four.meme REST API client — token creation, image upload.
+Updated Feb 2026 API with tax token support.
 """
 from __future__ import annotations
 
 import logging
 import mimetypes
+import os
 from pathlib import Path
 
 import httpx
 
-from .auth import FourMemeAuth
+from .auth import FourMemeAuth, BROWSER_HEADERS
 
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://four.meme/meme-api"
+
+# Our platform wallet — receives 2% of all trades post-graduation
+PLATFORM_FEE_WALLET = os.environ.get("PLATFORM_FEE_WALLET", "")
+
+RAISED_TOKEN = {
+    "symbol": "BNB",
+    "nativeSymbol": "BNB",
+    "symbolAddress": "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c",
+    "deployCost": "0",
+    "buyFee": "0.01",
+    "sellFee": "0.01",
+    "minTradeFee": "0",
+    "b0Amount": "8",
+    "totalBAmount": "24",
+    "totalAmount": "1000000000",
+    "logoUrl": "https://static.four.meme/market/68b871b6-96f7-408c-b8d0-388d804b34275092658264263839640.png",
+    "tradeLevel": ["0.1", "0.5", "1"],
+    "status": "PUBLISH",
+    "buyTokenLink": "https://pancakeswap.finance/swap",
+    "reservedNumber": 10,
+    "saleRate": "0.8",
+    "networkCode": "BSC",
+    "platform": "MEME",
+}
 
 
 class FourMemeError(Exception):
@@ -25,14 +51,8 @@ class FourMemeError(Exception):
 
 class FourMemeClient:
     """
-    Async HTTP client wrapping four.meme's private + public API endpoints.
-
-    Usage:
-        auth   = FourMemeAuth(private_key=os.environ["WALLET_PRIVATE_KEY"])
-        client = FourMemeClient(auth)
-        img_url = await client.upload_image("logo.png")
-        result  = await client.create_token(name="MyToken", symbol="MTK", ...)
-        await client.close()
+    Async HTTP client wrapping four.meme's private API endpoints.
+    Supports tax token creation with 2%/1% fee split.
     """
 
     def __init__(self, auth: FourMemeAuth) -> None:
@@ -40,54 +60,18 @@ class FourMemeClient:
         self._http = httpx.AsyncClient(
             base_url=BASE_URL,
             timeout=60,
-            headers={
-                "User-Agent": "fourmeme-py/0.1.0",
-                "Origin": "https://four.meme",
-                "Referer": "https://four.meme/",
-            },
+            headers=BROWSER_HEADERS,
         )
 
     def _check(self, data: dict, endpoint: str) -> None:
         code = data.get("code", 0)
-        if code not in (0, 200):
+        if code not in (0, "0", 200):
             raise FourMemeError(code, data.get("msg", "unknown error"), endpoint)
-
-    # ── Public ────────────────────────────────────────────────────────────────
-
-    async def get_sys_config(self) -> dict:
-        """Fetch platform config (chain IDs, contract addresses, fee params)."""
-        resp = await self._http.get("/v1/public/sys/config")
-        resp.raise_for_status()
-        data = resp.json()
-        self._check(data, "/v1/public/sys/config")
-        return data["data"]
-
-    async def get_ticker(self, page: int = 1, page_size: int = 20) -> dict:
-        """Fetch currently trading tokens (bonding curve stage)."""
-        resp = await self._http.get(
-            "/v1/public/ticker",
-            params={"pageNo": page, "pageSize": page_size, "status": "TRADING"},
-        )
-        resp.raise_for_status()
-        return resp.json().get("data", {})
-
-    async def get_token_detail(self, address: str) -> dict:
-        """Fetch on-chain + market details for a deployed token."""
-        resp = await self._http.get(
-            "/v1/public/token/detail",
-            params={"address": address},
-        )
-        resp.raise_for_status()
-        return resp.json().get("data", {})
-
-    # ── Private ───────────────────────────────────────────────────────────────
 
     async def upload_image(self, image_path: str | Path) -> str:
         """
-        Upload a token logo image.
-
-        Returns:
-            imgUrl string to pass into create_token().
+        Upload a token logo image to four.meme CDN.
+        Returns the hosted imgUrl.
         """
         path = Path(image_path)
         mime = mimetypes.guess_type(str(path))[0] or "image/png"
@@ -96,14 +80,14 @@ class FourMemeClient:
 
         with open(path, "rb") as f:
             resp = await self._http.post(
-                "/v1/private/tool/upload",
+                "/v1/private/token/upload",
                 files={"file": (path.name, f, mime)},
                 headers=headers,
             )
         resp.raise_for_status()
         data = resp.json()
-        self._check(data, "/v1/private/tool/upload")
-        url = data["data"]["url"]
+        self._check(data, "/v1/private/token/upload")
+        url = data["data"] if isinstance(data["data"], str) else data["data"]["url"]
         logger.info("Image uploaded: %s", url)
         return url
 
@@ -113,37 +97,80 @@ class FourMemeClient:
         symbol: str,
         description: str,
         img_url: str,
-        raised_amount: float = 0,
-        raised_token_symbol: str = "BNB",
+        presale_bnb: float = 0,
         twitter: str = "",
         telegram: str = "",
         website: str = "",
+        creator_wallet: str = "",
+        label: str = "AI",
+        anti_sniper: bool = False,
     ) -> dict:
         """
         Request token creation args + signature from four.meme backend.
 
-        The returned dict contains:
-            createArg  — ABI-encoded constructor args
-            signature  — server signature authorising the on-chain call
-
-        These must be submitted on-chain to TokenManager2.createToken()
-        (see onchain.py).
+        Tax split (locked at creation, enforced on-chain):
+          - 3% total fee on every PancakeSwap trade post-graduation
+          - 67% of tax (2% effective) → PLATFORM_FEE_WALLET
+          - 33% of tax (1% effective) → creator_wallet (as dividends to holders
+            — if no creator_wallet provided, goes to burn)
 
         Returns:
             {"createArg": "0x...", "signature": "0x..."}
         """
         session = await self.auth.get_session()
+
+        # Build tax config
+        if creator_wallet and PLATFORM_FEE_WALLET:
+            # Full split: 2% platform, 1% creator as recipient
+            token_tax_info = {
+                "feeRate": 3,
+                "recipientRate": 67,
+                "recipientAddress": PLATFORM_FEE_WALLET,
+                "divideRate": 33,
+                "burnRate": 0,
+                "liquidityRate": 0,
+                "minSharing": 100000,
+            }
+            # Note: divideRate goes to token holders proportionally.
+            # Creator gets their share by holding tokens in their wallet.
+            # If you want creator to get a direct cut, set recipientRate split differently.
+        elif PLATFORM_FEE_WALLET:
+            # Platform only, no creator split
+            token_tax_info = {
+                "feeRate": 3,
+                "recipientRate": 100,
+                "recipientAddress": PLATFORM_FEE_WALLET,
+                "divideRate": 0,
+                "burnRate": 0,
+                "liquidityRate": 0,
+                "minSharing": 100000,
+            }
+        else:
+            token_tax_info = None
+
         payload = {
             "name": name,
-            "symbol": symbol,
-            "description": description,
+            "shortName": symbol,
+            "desc": description[:200],
             "imgUrl": img_url,
-            "raisedTokenSymbol": raised_token_symbol,
-            "raisedAmount": str(raised_amount),
-            "twitter": twitter,
-            "telegram": telegram,
-            "website": website,
+            "launchTime": __import__("time").time_ns() // 1_000_000 + 60_000,
+            "label": label,
+            "lpTradingFee": 0.0025,
+            "preSale": str(presale_bnb),
+            "onlyMPC": False,
+            "feePlan": anti_sniper,
+            "raisedToken": RAISED_TOKEN,
         }
+
+        if twitter:
+            payload["twitterUrl"] = twitter
+        if telegram:
+            payload["telegramUrl"] = telegram
+        if website:
+            payload["webUrl"] = website
+        if token_tax_info:
+            payload["tokenTaxInfo"] = token_tax_info
+
         resp = await self._http.post(
             "/v1/private/token/create",
             json=payload,
@@ -154,16 +181,6 @@ class FourMemeClient:
         self._check(data, "/v1/private/token/create")
         logger.info("Token creation args received for %s (%s)", name, symbol)
         return data["data"]
-
-    async def get_my_tokens(self) -> list[dict]:
-        """List all tokens launched by the authenticated wallet."""
-        session = await self.auth.get_session()
-        resp = await self._http.get(
-            "/v1/private/token/my/list",
-            headers=session.headers,
-        )
-        resp.raise_for_status()
-        return resp.json().get("data", {}).get("list", [])
 
     async def close(self) -> None:
         await self._http.aclose()
