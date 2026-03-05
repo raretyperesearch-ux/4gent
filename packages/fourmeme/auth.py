@@ -1,6 +1,10 @@
 """
 four.meme authentication — nonce + wallet signature login flow.
-Updated Feb 2026 API endpoints.
+
+Official endpoints (API-CreateToken docs, 02-02-2026):
+  POST /v1/private/user/nonce/generate   → nonce
+  POST /v1/private/user/login/dex        → access token
+  Header: meme-web-access: {token}
 """
 from __future__ import annotations
 
@@ -14,13 +18,6 @@ from eth_account.messages import encode_defunct
 
 BASE_URL = "https://four.meme/meme-api"
 
-BROWSER_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Referer": "https://four.meme/",
-    "Origin": "https://four.meme",
-    "Accept": "application/json, text/plain, */*",
-}
-
 
 @dataclass
 class Session:
@@ -32,7 +29,6 @@ class Session:
         return {
             "meme-web-access": self.access_token,
             "Content-Type": "application/json",
-            **BROWSER_HEADERS,
         }
 
     def is_expired(self) -> bool:
@@ -43,10 +39,10 @@ class FourMemeAuth:
     """
     Handles wallet-based login to four.meme.
 
-    Login flow (Feb 2026):
-      1. POST /v1/private/user/nonce/generate  -> nonce string
+    Login flow (from official API docs):
+      1. POST /v1/private/user/nonce/generate  → nonce string
       2. Sign "You are sign in Meme {nonce}" with private key
-      3. POST /v1/private/user/login/dex       -> accessToken
+      3. POST /v1/private/user/login/dex       → access token
     """
 
     def __init__(self, private_key: str) -> None:
@@ -55,7 +51,11 @@ class FourMemeAuth:
         self._http = httpx.AsyncClient(
             base_url=BASE_URL,
             timeout=30,
-            headers=BROWSER_HEADERS,
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "Origin": "https://four.meme",
+                "Referer": "https://four.meme/",
+            },
         )
         self._session: Session | None = None
 
@@ -73,7 +73,10 @@ class FourMemeAuth:
             },
         )
         resp.raise_for_status()
-        return resp.json()["data"]
+        body = resp.json()
+        if str(body.get("code", "0")) != "0":
+            raise RuntimeError(f"Nonce generation failed: {body}")
+        return body["data"]
 
     async def _login(self, nonce: str) -> Session:
         message = encode_defunct(text=f"You are sign in Meme {nonce}")
@@ -95,8 +98,10 @@ class FourMemeAuth:
             },
         )
         resp.raise_for_status()
-        data = resp.json()["data"]
-        token = data if isinstance(data, str) else data.get("accessToken", "")
+        body = resp.json()
+        if str(body.get("code", "0")) != "0":
+            raise RuntimeError(f"Login failed: {body}")
+        token = body["data"]
         return Session(
             access_token=token,
             expires_at=time.time() + 3600,
