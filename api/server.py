@@ -387,6 +387,34 @@ async def bot_pool_status():
     }
 
 
+@app.post("/admin/seed-bots")
+async def seed_bots(body: dict):
+    """
+    Seed bot pool from JSON payload.
+    POST {"bots": [{"username": "@FourGentAgent1_bot", "token": "..."}]}
+    """
+    db = get_db()
+    bots = body.get("bots", [])
+    if not bots:
+        raise HTTPException(status_code=400, detail="No bots provided")
+
+    inserted = []
+    for b in bots:
+        username = b.get("username", "").strip()
+        token = b.get("token", "").strip()
+        if not username or not token:
+            continue
+        # Upsert — safe to call multiple times
+        db.table("bot_pool").upsert({
+            "bot_username": username,
+            "bot_token": token,
+            "available": True,
+        }, on_conflict="bot_username").execute()
+        inserted.append(username)
+
+    return {"seeded": inserted, "count": len(inserted)}
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
