@@ -30,7 +30,7 @@ from supabase import create_client, Client
 import sys as _sys, os as _os
 _sys.path.insert(0, _os.path.join(_os.path.dirname(__file__), "..", "packages"))
 
-from core.launch import prepare_launch, confirm_launch, LaunchConfig
+from core.launch import run_launch, LaunchConfig
 from core.monitor import FourMemeMonitor
 from core.scheduler import AgentScheduler, AgentRuntime
 from core.telegram import handle_owner_command
@@ -131,18 +131,13 @@ class LaunchResponse(BaseModel):
     message: str
 
 
-class PrepareResponse(BaseModel):
+class PaymentRequestResponse(BaseModel):
     agent_id: str
-    create_arg: str
-    signature: str
-    contract_address: str
-    value_wei: str          # BNB to send in wei (string for JS BigInt safety)
-    calldata: str           # fully ABI-encoded tx data — frontend just submits this directly
-    status: str
+    platform_wallet: str
+    amount_bnb: float
+    amount_wei: str
 
 
-class ConfirmRequest(BaseModel):
-    tx_hash: str = ""
 
 
 class AgentStatusResponse(BaseModel):
@@ -210,18 +205,134 @@ async def upload_image(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"Image upload failed: {str(e)}")
 
 
-@app.post("/launch/prepare", response_model=PrepareResponse)
-async def launch_prepare(req: LaunchRequest):
+PLATFORM_WALLET = "0xA660a38f40a519F2E351Cc9A5CA2f5feE1a9BE0D"
+LAUNCH_FEE_WEI = 10_000_000_000_000_000  # 0.01 BNB
+
+
+@app.post("/launch/request-payment", response_model=PaymentRequestResponse)
+async def launch_request_payment(req: LaunchRequest):
+    """Step 1 — Create agent record, return platform wallet for user to send 0.01 BNB to."""
+    if not req.image_url or not req.image_url.startswith("https://"):
+        raise HTTPException(status_code=400, detail="image_url is required.")
+
+    db = get_db()
+    agent_id = str(uuid.uuid4())
+    db.table("agents").insert({
+        "id":              agent_id,
+        "name":            req.name,
+        "ticker":          req.ticker,
+        "archetype":       req.archetype,
+        "prompt":          req.prompt,
+        "image_url":       req.image_url,
+        "tg_channel_link": req.tg_channel_link,
+        "owner_wallet":    req.owner_wallet,
+        "trading_enabled": req.trading_enabled,
+        "max_trade_bnb":   req.max_trade_bnb,
+        "daily_limit_bnb": req.daily_limit_bnb,
+        "stop_loss_pct":   req.stop_loss_pct,
+        "raise_amount_bnb": req.raise_amount_bnb,
+        "status":          "awaiting_payment",
+    }).execute()
+
+    return PaymentRequestResponse(
+        agent_id=agent_id,
+        platform_wallet=PLATFORM_WALLET,
+        amount_bnb=0.01,
+        amount_wei=str(LAUNCH_FEE_WEI),
+    )
+
+
+class PaymentConfirmRequest(BaseModel):
+    tx_hash: str
+
+
+@app.post("/launch/confirm-payment/{agent_id}", response_model=LaunchResponse)
+async def launch_confirm_payment(agent_id: str, req: PaymentConfirmRequest, background_tasks: BackgroundTasks):
+    """Step 2 — Frontend provides payment tx hash. Backend verifies + fires launch pipeline."""
+    if not req.tx_hash or not req.tx_hash.startswith("0x"):
+        raise HTTPException(status_code=400, detail="tx_hash required")
+
+    db = get_db()
+    row = db.table("agents").select("*").eq("id", agent_id).execute()
+    if not row.data:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    agent = row.data[0]
+    if agent["status"] != "awaiting_payment":
+        raise HTTPException(status_code=400, detail=f"Agent status is '{agent['status']}' — expected awaiting_payment")
+
+    config = LaunchConfig(
+        agent_id=agent_id,
+        name=agent["name"],
+        ticker=agent["ticker"],
+        archetype=agent["archetype"],
+        prompt=agent["prompt"] or "",
+        image_url=agent["image_url"],
+        tg_channel_link=agent["tg_channel_link"] or "",
+        owner_wallet=agent["owner_wallet"] or "",
+        trading_enabled=agent["trading_enabled"],
+        max_trade_bnb=float(agent["max_trade_bnb"]),
+        daily_limit_bnb=float(agent["daily_limit_bnb"]),
+        stop_loss_pct=float(agent.get("stop_loss_pct", 50.0)),
+        raise_amount_bnb=float(agent["raise_amount_bnb"]),
+    )
+
+    background_tasks.add_task(_run_launch_with_payment_check, config, req.tx_hash)
+
+    return LaunchResponse(
+        agent_id=agent_id,
+        status="launching",
+        message="Payment received. Deploying token — poll /agent/{agent_id} for status.",
+    )
+
+
+async def _run_launch_with_payment_check(config: LaunchConfig, payment_tx_hash: str) -> None:
+    """Verify payment confirmed on BSC then run full launch pipeline."""
+    from web3 import Web3
+
+    db = get_db()
+    bsc_rpc = os.environ.get("BSC_RPC_URL", "https://bsc-dataseed1.binance.org/")
+    w3 = Web3(Web3.HTTPProvider(bsc_rpc))
+
+    try:
+        loop = asyncio.get_running_loop()
+        receipt = await loop.run_in_executor(
+            None,
+            lambda: w3.eth.wait_for_transaction_receipt(payment_tx_hash, timeout=120)
+        )
+        if receipt["status"] != 1:
+            raise RuntimeError(f"Payment tx failed on BSC: {payment_tx_hash}")
+
+        tx = await loop.run_in_executor(
+            None,
+            lambda: w3.eth.get_transaction(payment_tx_hash)
+        )
+        if tx["value"] < LAUNCH_FEE_WEI:
+            raise RuntimeError(f"Insufficient payment: got {tx['value']} wei, need {LAUNCH_FEE_WEI}")
+        if tx["to"].lower() != PLATFORM_WALLET.lower():
+            raise RuntimeError(f"Payment sent to wrong address: {tx['to']}")
+
+        logger.info("[%s] Payment confirmed: %s", config.name, payment_tx_hash)
+        db.table("agents").update({"status": "launching", "payment_tx_hash": payment_tx_hash}).eq("id", config.agent_id).execute()
+
+    except Exception as e:
+        logger.error("[%s] Payment verification failed: %s", config.name, e)
+        db.table("agents").update({"status": "error", "error_message": f"Payment failed: {e}"}).eq("id", config.agent_id).execute()
+        return
+
+    await _run_launch(config)
+
+
+@app.post("/launch", response_model=LaunchResponse)
+async def launch(req: LaunchRequest, background_tasks: BackgroundTasks):
     """
-    Phase 1 of 2 — wizard submits config, backend fetches createArg+signature from four.meme.
-    Returns the args the frontend needs to submit createToken() via the user's own wallet.
-    User pays gas themselves — no platform wallet needed for the deploy tx.
+    Single-phase launch — platform wallet submits the createToken() tx on BSC.
+    Returns immediately with agent_id; frontend polls /agent/{agent_id} for status.
+    User's wallet is stored as owner/fee recipient only.
     """
     if not req.image_url or not req.image_url.startswith("https://"):
         raise HTTPException(
             status_code=400,
-            detail="image_url is required and must be a valid https:// CDN URL. "
-                   "Upload the image first via POST /upload-image."
+            detail="image_url is required. Upload via POST /upload-image first."
         )
 
     db = get_db()
@@ -260,57 +371,25 @@ async def launch_prepare(req: LaunchRequest):
         raise_amount_bnb=req.raise_amount_bnb,
     )
 
-    result = await prepare_launch(config)
-    if not result.success:
-        raise HTTPException(status_code=500, detail=result.error)
-
-    return PrepareResponse(
-        agent_id=agent_id,
-        create_arg=result.create_arg,
-        signature=result.signature,
-        contract_address=result.contract_address,
-        value_wei=result.value_wei,
-        calldata=result.calldata,
-        status="awaiting_tx",
-    )
-
-
-@app.post("/launch/confirm/{agent_id}", response_model=LaunchResponse)
-async def launch_confirm(agent_id: str, req: ConfirmRequest, background_tasks: BackgroundTasks):
-    """
-    Phase 2 of 2 — frontend has submitted the createToken() tx from the user's wallet.
-    Receives tx_hash, runs post-deploy pipeline in background (bot, posts, claim code).
-    """
-    if not req.tx_hash or not req.tx_hash.startswith("0x"):
-        raise HTTPException(status_code=400, detail="tx_hash is required (0x...)")
-
-    db = get_db()
-    row = db.table("agents").select("status").eq("id", agent_id).execute()
-    if not row.data:
-        raise HTTPException(status_code=404, detail="Agent not found")
-    if row.data[0]["status"] not in ("awaiting_tx", "preparing"):
-        raise HTTPException(status_code=400,
-                            detail=f"Agent is in status '{row.data[0]['status']}' — expected awaiting_tx")
-
-    background_tasks.add_task(_run_confirm, agent_id, req.tx_hash)
+    background_tasks.add_task(_run_launch, config)
 
     return LaunchResponse(
         agent_id=agent_id,
         status="launching",
-        message="TX received. Poll /agent/{agent_id} for status.",
+        message="Launch started. Poll /agent/{agent_id} for status.",
     )
 
 
-async def _run_confirm(agent_id: str, tx_hash: str) -> None:
-    """Background task — runs post-deploy pipeline then registers runtime in scheduler."""
-    result = await confirm_launch(agent_id, tx_hash)
+async def _run_launch(config: LaunchConfig) -> None:
+    """Background task — runs full launch pipeline then registers runtime in scheduler."""
+    result = await run_launch(config)
     if result.success:
         db = get_db()
         row = db.table("agents").select(
             "id, name, ticker, archetype, prompt, tg_channel_link, "
             "trading_enabled, max_trade_bnb, daily_limit_bnb, stop_loss_pct, "
             "agent_wallet, agent_wallet_enc, tg_bot_id"
-        ).eq("id", agent_id).execute()
+        ).eq("id", config.agent_id).execute()
         if row.data:
             agent = row.data[0]
             bot_token = ""
@@ -337,9 +416,9 @@ async def _run_confirm(agent_id: str, tx_hash: str) -> None:
                 supabase=db,
             )
             scheduler.register(runtime)
-        logger.info("Agent %s confirmed and registered in scheduler", agent_id)
+        logger.info("Agent %s launched and registered in scheduler", config.agent_id)
     else:
-        logger.error("Confirm failed for %s: %s", agent_id, result.error)
+        logger.error("Launch failed for %s: %s", config.agent_id, result.error)
 
 
 @app.get("/agent/{agent_id}", response_model=AgentStatusResponse)
