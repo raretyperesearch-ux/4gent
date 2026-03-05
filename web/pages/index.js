@@ -1,3 +1,5 @@
-import FourGent from "../4gent-final";
+import dynamic from "next/dynamic";
+
+const FourGent = dynamic(() => import("../4gent-final"), { ssr: false });
 
 export default FourGent;
