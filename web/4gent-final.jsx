@@ -92,7 +92,7 @@ function App() {
   const [logs, setLogs]           = useState([]);
   const [launched, setLaunched]   = useState(false);
   const [previewIdx, setPreviewIdx] = useState(0);
-  const [imgMode, setImgMode]     = useState("ai");
+  const [imgMode, setImgMode]     = useState("upload");
   const [imgFile, setImgFile]     = useState(null);
   const [imgPreview, setImgPreview] = useState(null);
   const [feeAck, setFeeAck]       = useState(false);
@@ -115,7 +115,7 @@ function App() {
     name:"", ticker:"", archetype:null,
     prompt:"",
     tgLink:"",
-    trading:false, maxTrade:"0.1", dailyLimit:"1", stopLoss:"50",
+    trading:false, maxTrade:"0.1", dailyLimit:"1", stopLoss:"50", raiseAmount:"0",
   });
 
   const arch    = ARCHETYPES.find(a => a.id === form.archetype);
@@ -147,7 +147,7 @@ function App() {
 
   function canNext() {
     if (step===0) return form.name && form.ticker && form.archetype;
-    if (step===1) return form.prompt.length > 5 && (imgMode==="ai" || imgFile);
+    if (step===1) return form.prompt.length > 5 && imgFile;
     if (step===2) return form.tgLink.length > 5;
     if (step===4) return wallet && feeAck;
     return true;
@@ -165,21 +165,23 @@ function App() {
     try {
       addLog("INITIATING LAUNCH SEQUENCE");
 
-      // Upload image if file selected
+      // Upload image to four.meme CDN — required
       let imageUrl = "";
-      if (imgMode === "upload" && imgFile) {
+      if (imgFile) {
         addLog("UPLOADING TOKEN IMAGE TO FOUR.MEME CDN");
-        // Convert file to base64 and send to backend for CDN upload
-        const b64 = await new Promise(res => {
-          const r = new FileReader(); r.onload = e => res(e.target.result); r.readAsDataURL(imgFile);
-        });
-        imageUrl = b64; // backend handles CDN upload
-        addLog("IMAGE STORED", true);
+        const fd = new FormData();
+        fd.append("file", imgFile);
+        const upResp = await fetch(`${API_URL}/upload-image`, { method: "POST", body: fd });
+        if (!upResp.ok) {
+          const err = await upResp.json().catch(() => ({}));
+          throw new Error(err.detail || "Image upload failed");
+        }
+        const upJson = await upResp.json();
+        imageUrl = upJson.url;
+        if (!imageUrl || !imageUrl.startsWith("http")) throw new Error("Invalid image URL returned");
+        addLog("IMAGE UPLOADED ✓", true);
       } else {
-        // AI generate mode — backend generates via Claude
-        addLog("GENERATING TOKEN IMAGE VIA CLAUDE");
-        imageUrl = "ai-generate"; // backend will generate
-        addLog("IMAGE QUEUED", true);
+        throw new Error("No image selected");
       }
 
       addLog("SUBMITTING TO 4GENT API");
@@ -198,7 +200,7 @@ function App() {
           max_trade_bnb:   parseFloat(form.maxTrade),
           daily_limit_bnb: parseFloat(form.dailyLimit),
           stop_loss_pct:   parseFloat(form.stopLoss),
-          raise_amount_bnb: 0,
+          raise_amount_bnb: parseFloat(form.raiseAmount) || 0,
         }),
       });
 
@@ -465,40 +467,18 @@ function App() {
               {/* IMAGE — fixed: moved here from missing step */}
               <div>
                 <Label>TOKEN IMAGE</Label>
-                <div style={{display:"flex",border:"1px solid #E8E0C8",marginBottom:10,overflow:"hidden"}}>
-                  {[["ai","◈ AI GENERATE"],["upload","↑ UPLOAD YOURS"]].map(([m,l])=>(
-                    <div key={m} className="mb" onClick={()=>setImgMode(m)} style={{
-                      flex:1,
-                      background:imgMode===m?"#0A0A0A":"#FEFCF5",
-                      color:imgMode===m?G:"#A89868",
-                      borderRight:m==="ai"?"1px solid #E8E0C8":"none",
-                    }}>{l}</div>
-                  ))}
+                <div className="uz" onClick={()=>fileRef.current?.click()}>
+                  {imgPreview
+                    ? <img src={imgPreview} style={{maxHeight:80,maxWidth:"100%",objectFit:"contain"}}/>
+                    : <>
+                        <div style={{fontFamily:M,fontSize:24,color:G,marginBottom:8}}>◈</div>
+                        <div style={{fontFamily:M,fontSize:9,color:"#A89868",letterSpacing:2}}>CLICK TO UPLOAD</div>
+                        <div style={{fontFamily:M,fontSize:8,color:"#C0B888",marginTop:4}}>PNG / JPG — SQUARE RECOMMENDED</div>
+                      </>
+                  }
                 </div>
-
-                {imgMode==="ai"&&(
-                  <Card style={{padding:"14px"}}>
-                    <div style={{fontFamily:M,fontSize:9,color:"#606050",lineHeight:1.8}}>
-                      CLAUDE GENERATES A CUSTOM IMAGE BASED ON YOUR AGENT NAME, ARCHETYPE, AND MISSION.<br/>
-                      <span style={{color:"#C0B888"}}>YOU'LL PREVIEW IT BEFORE ANYTHING DEPLOYS.</span>
-                    </div>
-                  </Card>
-                )}
-
-                {imgMode==="upload"&&<>
-                  <div className="uz" onClick={()=>fileRef.current?.click()}>
-                    {imgPreview
-                      ? <img src={imgPreview} style={{maxHeight:80,maxWidth:"100%",objectFit:"contain"}}/>
-                      : <>
-                          <div style={{fontFamily:M,fontSize:24,color:G,marginBottom:8}}>◈</div>
-                          <div style={{fontFamily:M,fontSize:9,color:"#A89868",letterSpacing:2}}>CLICK TO UPLOAD</div>
-                          <div style={{fontFamily:M,fontSize:8,color:"#C0B888",marginTop:4}}>PNG / JPG — SQUARE RECOMMENDED</div>
-                        </>
-                    }
-                  </div>
-                  <input ref={fileRef} type="file" accept="image/*" style={{display:"none"}} onChange={handleFile}/>
-                  {imgFile&&<div style={{fontFamily:M,fontSize:8,color:"#5DB870",marginTop:5}}>◈ {imgFile.name}</div>}
-                </>}
+                <input ref={fileRef} type="file" accept="image/*" style={{display:"none"}} onChange={handleFile}/>
+                {imgFile&&<div style={{fontFamily:M,fontSize:8,color:"#5DB870",marginTop:5}}>◈ {imgFile.name}</div>}
               </div>
             </div>
           </div>}
@@ -664,8 +644,9 @@ function App() {
                     ["AGENT",    `${form.name||"—"} / $${form.ticker||"—"}`],
                     ["ARCHETYPE",arch?.label||"—"],
                     ["CHANNEL",  `t.me/${handle}`],
-                    ["IMAGE",    imgMode==="ai"?"AI GENERATED (CLAUDE)":"CUSTOM UPLOAD"],
+                    ["IMAGE",    imgFile ? imgFile.name : "NONE"],
                     ["TRADING",  form.trading?`ON — ${form.maxTrade} BNB MAX / ${form.dailyLimit} BNB DAILY`:"OFF"],
+                    ["SEED BUY", parseFloat(form.raiseAmount) > 0 ? `${form.raiseAmount} BNB AT DEPLOY` : "NONE"],
                     ["TAX",      "3% ON ALL PANCAKESWAP TRADES POST-GRADUATION"],
                   ].map(([k,v])=>(
                     <div key={k} style={{display:"flex",padding:"8px 14px",borderBottom:"1px solid #F0E8D8",gap:16}}>
@@ -676,9 +657,41 @@ function App() {
                 </Card>
               </div>
 
+              {/* SEED BUY */}
+              <div>
+                <Label>03 — INITIAL BUY (OPTIONAL)</Label>
+                <div style={{border:"1px solid #E8E0C8",background:"#FEFCF5",padding:"14px 14px 10px"}}>
+                  <div style={{fontFamily:M,fontSize:8,color:"#A89868",marginBottom:10,letterSpacing:1,lineHeight:1.7}}>
+                    BUY YOUR OWN TOKEN AT LAUNCH. AMOUNT IN BNB — SENT ON-CHAIN WHEN TOKEN DEPLOYS.
+                  </div>
+                  <div style={{display:"flex",alignItems:"center",gap:10}}>
+                    <input
+                      type="number" min="0" max="20" step="0.01"
+                      value={form.raiseAmount}
+                      onChange={e=>upd("raiseAmount", e.target.value)}
+                      style={{
+                        fontFamily:M,fontSize:12,color:"#1A1A0A",background:"#F5F2EA",
+                        border:"1px solid #D8D0C0",padding:"10px 12px",width:120,
+                        outline:"none",letterSpacing:2,
+                      }}
+                      placeholder="0.00"
+                    />
+                    <div style={{fontFamily:M,fontSize:10,color:"#706850",letterSpacing:2}}>BNB</div>
+                    {parseFloat(form.raiseAmount) > 0 && (
+                      <div style={{fontFamily:M,fontSize:8,color:"#5DB870",marginLeft:"auto",letterSpacing:1}}>
+                        ◈ BUYING {form.raiseAmount} BNB AT DEPLOY
+                      </div>
+                    )}
+                  </div>
+                  <div style={{fontFamily:M,fontSize:7,color:"#C0B888",marginTop:8,letterSpacing:1,lineHeight:1.6}}>
+                    LEAVE AT 0 TO DEPLOY WITH NO INITIAL BUY. MAX 20 BNB.
+                  </div>
+                </div>
+              </div>
+
               {/* FEE ACKNOWLEDGMENT */}
               <div>
-                <Label>03 — ACKNOWLEDGE COSTS</Label>
+                <Label>04 — ACKNOWLEDGE COSTS</Label>
                 <div className="ck" onClick={()=>setFeeAck(!feeAck)}>
                   <div style={{width:14,height:14,border:`1px solid ${G}`,flexShrink:0,marginTop:1,
                     display:"flex",alignItems:"center",justifyContent:"center",
