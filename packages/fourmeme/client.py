@@ -62,41 +62,10 @@ class FourMemeClient:
     # ── Public ────────────────────────────────────────────────────────────────
 
     async def get_public_config(self) -> dict:
-        """Fetch platform config including live raisedToken options."""
+        """Fetch platform config."""
         resp = await self._http.get("/v1/public/config")
         resp.raise_for_status()
         return resp.json().get("data", {})
-
-    async def _get_raised_token_bnb(self) -> dict:
-        """Fetch live BNB raisedToken config from /v1/public/config."""
-        config = await self.get_public_config()
-        raised_tokens = config.get("raisedTokens") or config.get("raisedTokenList") or []
-        for token in raised_tokens:
-            if token.get("symbol") == "BNB" or token.get("nativeSymbol") == "BNB":
-                logger.info("Live raisedToken BNB config fetched: %s", token)
-                return token
-        # Fallback to known-good values if config shape changes
-        logger.warning("Could not find BNB in /v1/public/config raisedTokens — using fallback")
-        return {
-            "symbol": "BNB",
-            "nativeSymbol": "BNB",
-            "symbolAddress": "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c",
-            "deployCost": "0",
-            "buyFee": "0.01",
-            "sellFee": "0.01",
-            "minTradeFee": "0",
-            "b0Amount": "8",
-            "totalBAmount": "24",
-            "totalAmount": "1000000000",
-            "logoUrl": "https://static.four.meme/market/68b871b6-96f7-408c-b8d0-388d804b34275092658264263839640.png",
-            "tradeLevel": ["0.1", "0.5", "1"],
-            "status": "PUBLISH",
-            "buyTokenLink": "https://pancakeswap.finance/swap",
-            "reservedNumber": 10,
-            "saleRate": "0.8",
-            "networkCode": "BSC",
-            "platform": "MEME",
-        }
 
     # ── Private ───────────────────────────────────────────────────────────────
 
@@ -185,7 +154,26 @@ class FourMemeClient:
             {"createArg": "0x...", "signature": "0x..."}
         """
         session = await self.auth.get_session()
-        raised_token = await self._get_raised_token_bnb()
+        raised_token = {
+            "symbol": "BNB",
+            "nativeSymbol": "BNB",
+            "symbolAddress": "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c",
+            "deployCost": "0",
+            "buyFee": "0.01",
+            "sellFee": "0.01",
+            "minTradeFee": "0",
+            "b0Amount": "8",
+            "totalBAmount": "24",
+            "totalAmount": "1000000000",
+            "logoUrl": "https://static.four.meme/market/68b871b6-96f7-408c-b8d0-388d804b34275092658264263839640.png",
+            "tradeLevel": ["0.1", "0.5", "1"],
+            "status": "PUBLISH",
+            "buyTokenLink": "https://pancakeswap.finance/swap",
+            "reservedNumber": 10,
+            "saleRate": "0.8",
+            "networkCode": "BSC",
+            "platform": "MEME",
+        }
 
         payload = {
             "name": name,
