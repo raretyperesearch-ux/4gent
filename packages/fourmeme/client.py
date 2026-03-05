@@ -195,7 +195,7 @@ class FourMemeClient:
             "shortName": short_name,
             "desc": description,
             "imgUrl": img_url,
-            "launchTime": int(time.time() * 1000) + 10_000,  # +10s buffer so server processing lag doesn't put it in the past
+            "launchTime": int(time.time() * 1000) + 300_000,  # +5 min buffer so user has time to review and confirm in MetaMask
             "label": label,
             "lpTradingFee": 0.0025,
             "preSale": str(pre_sale),
