@@ -1,6 +1,6 @@
 """
 4Gent — four.meme Launch Monitor
-Single shared Bitquery websocket. Fans new token events to all active agents.
+Bitquery API v2 websocket. Fans new token events to all active agents.
 """
 from __future__ import annotations
 
@@ -15,44 +15,59 @@ import websockets
 
 logger = logging.getLogger(__name__)
 
-BITQUERY_WS  = "wss://streaming.bitquery.io/eap"
-FOUMEME_CONTRACT = "0x5c952063c7fc8610FFDB798152D69F0B9550762b"
+# API v2 endpoint + four.meme TokenManager2 contract
+BITQUERY_WS       = "wss://streaming.bitquery.io/graphql_streaming"
+FOURMEME_CONTRACT = "0x5c952063c7fc8610FFDB798152D69F0B9550762b"
 
-# Watch for TokenCreated events on four.meme's TokenManager2
+# Bitquery API v2 — exact four.meme TokenCreate subscription
 NEW_TOKEN_SUB = """
 subscription {
-  EVM(network: bsc) {
+  EVM(dataset: realtime, network: bsc) {
     Events(
       where: {
-        Log: {
-          SmartContract: { is: "%s" }
-          Signature: { Name: { is: "TokenCreated" } }
-        }
+        Transaction: { To: { is: "%s" } }
+        Log: { Signature: { Name: { is: "TokenCreate" } } }
       }
     ) {
-      Block { Time Number }
-      Transaction { Hash From }
+      Log {
+        Signature {
+          Name
+          Signature
+        }
+      }
       Arguments {
         Name
+        Type
         Value {
-          ... on EVM_ABI_String_Value_Arg  { string }
-          ... on EVM_ABI_Address_Value_Arg { address }
+          ... on EVM_ABI_Integer_Value_Arg { integer }
+          ... on EVM_ABI_Boolean_Value_Arg { bool }
+          ... on EVM_ABI_Bytes_Value_Arg   { hex }
           ... on EVM_ABI_BigInt_Value_Arg  { bigInteger }
+          ... on EVM_ABI_Address_Value_Arg { address }
+          ... on EVM_ABI_String_Value_Arg  { string }
         }
+      }
+      Transaction {
+        Hash
+        To
+        From
+      }
+      Block {
+        Time
+        Number
       }
     }
   }
 }
-""" % FOUMEME_CONTRACT
+""" % FOURMEME_CONTRACT
 
 TokenHandler = Callable[[dict], Awaitable[None]]
 
 
 class FourMemeMonitor:
     """
-    Maintains a single Bitquery websocket.
-    Calls all registered handlers when a new four.meme token is detected.
-    Handlers receive enriched token_data dict including metadata from four.meme API.
+    Single shared Bitquery API v2 websocket.
+    Dispatches new four.meme token events to all registered agent handlers.
     """
 
     def __init__(self, api_key: str) -> None:
@@ -68,7 +83,7 @@ class FourMemeMonitor:
 
     async def start(self) -> None:
         self._running = True
-        logger.info("four.meme monitor starting...")
+        logger.info("four.meme monitor starting (Bitquery API v2)...")
         while self._running:
             try:
                 await self._connect()
@@ -80,24 +95,31 @@ class FourMemeMonitor:
         self._running = False
 
     async def _connect(self) -> None:
-        headers = {"X-API-KEY": self.api_key}
+        # API v2 uses Bearer token in connection_init payload
         async with websockets.connect(
             BITQUERY_WS,
-            additional_headers=headers,
             subprotocols=["graphql-ws"],
             ping_interval=30,
             ping_timeout=10,
         ) as ws:
-            await ws.send(json.dumps({"type": "connection_init"}))
+            # API v2 auth: pass token in connection_init params
+            await ws.send(json.dumps({
+                "type": "connection_init",
+                "payload": {
+                    "Authorization": f"Bearer {self.api_key}",
+                },
+            }))
+
             ack = json.loads(await ws.recv())
             if ack.get("type") != "connection_ack":
-                raise RuntimeError(f"Bitquery connection failed: {ack}")
+                raise RuntimeError(f"Bitquery connection_ack failed: {ack}")
 
             await ws.send(json.dumps({
-                "id": "fourgent-monitor",
+                "id": "4gent-fourmeme",
                 "type": "start",
                 "payload": {"query": NEW_TOKEN_SUB},
             }))
+
             logger.info("four.meme monitor connected ✓ watching BSC TokenCreated events")
 
             async for raw in ws:
@@ -106,6 +128,8 @@ class FourMemeMonitor:
                 msg = json.loads(raw)
                 if msg.get("type") == "data":
                     await self._on_data(msg.get("payload", {}))
+                elif msg.get("type") == "ka":
+                    pass  # keepalive — ignore
                 elif msg.get("type") == "error":
                     logger.error("Bitquery stream error: %s", msg)
 
@@ -113,9 +137,8 @@ class FourMemeMonitor:
         events = payload.get("data", {}).get("EVM", {}).get("Events", [])
         for event in events:
             token_data = self._parse_event(event)
-            if not token_data:
+            if not token_data or not token_data.get("address"):
                 continue
-            # Enrich with four.meme API metadata
             enriched = await self._enrich(token_data)
             await self._dispatch(enriched)
 
@@ -125,24 +148,28 @@ class FourMemeMonitor:
             for a in event.get("Arguments", []):
                 val = a.get("Value", {})
                 args[a["Name"]] = (
-                    val.get("string") or val.get("address") or val.get("bigInteger") or ""
+                    val.get("string")
+                    or val.get("address")
+                    or val.get("bigInteger")
+                    or val.get("integer")
+                    or ""
                 )
             return {
-                "address":      args.get("token", ""),
+                "address":      args.get("token", args.get("tokenAddress", "")),
                 "deployer":     event["Transaction"]["From"],
                 "tx_hash":      event["Transaction"]["Hash"],
                 "block_time":   event["Block"]["Time"],
                 "block_number": event["Block"]["Number"],
                 "name":         args.get("name", ""),
                 "symbol":       args.get("symbol", ""),
-                "raise_amount": args.get("raisedAmount", 0),
+                "raise_amount": args.get("raisedAmount", args.get("fundAmount", 0)),
             }
         except Exception as e:
-            logger.warning("Failed to parse event: %s", e)
+            logger.warning("Failed to parse event: %s — raw: %s", e, event)
             return None
 
     async def _enrich(self, token_data: dict) -> dict:
-        """Fetch additional metadata from four.meme public API."""
+        """Pull full metadata from four.meme public API."""
         try:
             address = token_data.get("address", "")
             if not address:
@@ -166,7 +193,10 @@ class FourMemeMonitor:
     async def _dispatch(self, token_data: dict) -> None:
         if not self._handlers:
             return
-        await asyncio.gather(
+        results = await asyncio.gather(
             *[h(token_data) for h in self._handlers],
             return_exceptions=True,
         )
+        for r in results:
+            if isinstance(r, Exception):
+                logger.error("Handler error: %s", r)
