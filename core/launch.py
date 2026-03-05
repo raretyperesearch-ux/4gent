@@ -130,20 +130,14 @@ async def prepare_launch(config: LaunchConfig) -> PrepareResult:
         finally:
             await client.close()
 
-        # encodeABI works purely locally — no RPC call, no gas estimation, no network needed
+        # Build calldata locally — no provider/RPC/network needed
+        # selector = keccak256("createToken(bytes,bytes)")[:4]
+        from eth_abi import encode as abi_encode
         from web3 import Web3
-        _w3 = Web3()
-        _contract = _w3.eth.contract(
-            address=Web3.to_checksum_address(TOKEN_MANAGER2_ADDRESS),
-            abi=TOKEN_MANAGER2_ABI
-        )
-        calldata = _contract.encodeABI(
-            fn_name="createToken",
-            args=[
-                bytes.fromhex(create_result["createArg"].removeprefix("0x")),
-                bytes.fromhex(create_result["signature"].removeprefix("0x")),
-            ]
-        )
+        selector = bytes.fromhex("5c9e4318")
+        arg1 = bytes.fromhex(create_result["createArg"].removeprefix("0x"))
+        arg2 = bytes.fromhex(create_result["signature"].removeprefix("0x"))
+        calldata = "0x" + selector.hex() + abi_encode(["bytes", "bytes"], [arg1, arg2]).hex()
 
         value_wei = str(Web3.to_wei(config.raise_amount_bnb, "ether"))
 
@@ -245,7 +239,7 @@ async def confirm_launch(agent_id: str, tx_hash: str) -> LaunchResult:
 
         # 5. Generate intro posts via Claude + attempt to post
         # No hard fail if posting fails — user hasn't added the bot yet.
-        # Posts are saved to DB regardless so they can be retried every 10 min.
+        # Posts are saved to DB regardless so they can be retried.
         logger.info("[%s] Step 5/6 — Generating intro posts", agent["name"])
         brain = ClaudeBrain(
             archetype=agent["archetype"],
@@ -267,7 +261,7 @@ async def confirm_launch(agent_id: str, tx_hash: str) -> LaunchResult:
                 "agent_id": agent_id,
                 "post_type": "intro",
                 "content": text,
-                "posted": False,
+                "posted": False,  # will be updated to True if/when actually posted
             }).execute()
             posted = await post_to_channel(bot["bot_token"], agent["tg_channel_link"], text)
             if posted:
