@@ -17,6 +17,8 @@ from typing import Optional
 from dotenv import load_dotenv
 load_dotenv()
 
+import httpx
+
 
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
