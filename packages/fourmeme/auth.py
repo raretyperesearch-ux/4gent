@@ -1,5 +1,6 @@
 """
 four.meme authentication — nonce + wallet signature login flow.
+Updated to use new /private endpoints (Feb 2026 API).
 """
 from __future__ import annotations
 
@@ -22,7 +23,7 @@ class Session:
     @property
     def headers(self) -> dict:
         return {
-            "Authorization": f"Bearer {self.access_token}",
+            "meme-web-access": self.access_token,
             "Content-Type": "application/json",
         }
 
@@ -34,16 +35,25 @@ class FourMemeAuth:
     """
     Handles wallet-based login to four.meme.
 
-    Login flow:
-      1. GET  /v1/public/user/login/nonce  -> nonce string
+    Login flow (updated Feb 2026):
+      1. POST /v1/private/user/nonce/generate  -> nonce string
       2. Sign "You are sign in Meme {nonce}" with private key
-      3. POST /v1/public/user/login        -> accessToken
+      3. POST /v1/private/user/login/dex       -> accessToken
     """
 
     def __init__(self, private_key: str) -> None:
         pk = private_key if private_key.startswith("0x") else f"0x{private_key}"
         self._account = Account.from_key(pk)
-        self._http = httpx.AsyncClient(base_url=BASE_URL, timeout=30)
+        self._http = httpx.AsyncClient(
+            base_url=BASE_URL,
+            timeout=30,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                "Referer": "https://four.meme/",
+                "Origin": "https://four.meme",
+                "Accept": "application/json, text/plain, */*",
+            }
+        )
         self._session: Session | None = None
 
     @property
@@ -51,29 +61,41 @@ class FourMemeAuth:
         return self._account.address
 
     async def _fetch_nonce(self) -> str:
-        resp = await self._http.get(
-            "/v1/public/user/login/nonce",
-            params={"address": self.address},
+        resp = await self._http.post(
+            "/v1/private/user/nonce/generate",
+            json={
+                "accountAddress": self.address,
+                "verifyType": "LOGIN",
+                "networkCode": "BSC"
+            },
         )
         resp.raise_for_status()
-        return resp.json()["data"]["nonce"]
+        return resp.json()["data"]
 
     async def _login(self, nonce: str) -> Session:
         message = encode_defunct(text=f"You are sign in Meme {nonce}")
         signed = self._account.sign_message(message)
         resp = await self._http.post(
-            "/v1/public/user/login",
+            "/v1/private/user/login/dex",
             json={
-                "address": self.address,
-                "signature": signed.signature.hex(),
-                "nonce": nonce,
+                "region": "WEB",
+                "langType": "EN",
+                "loginIp": "",
+                "inviteCode": "",
+                "verifyInfo": {
+                    "address": self.address,
+                    "networkCode": "BSC",
+                    "signature": signed.signature.hex(),
+                    "verifyType": "LOGIN"
+                },
+                "walletName": "MetaMask"
             },
         )
         resp.raise_for_status()
         data = resp.json()["data"]
         return Session(
-            access_token=data["accessToken"],
-            expires_at=time.time() + data.get("expiresIn", 3600),
+            access_token=data if isinstance(data, str) else data.get("accessToken"),
+            expires_at=time.time() + 3600,
         )
 
     async def get_session(self) -> Session:
