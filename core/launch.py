@@ -83,13 +83,22 @@ async def _deploy_token(config: LaunchConfig, wallet_address: str, private_key: 
     )
 
     try:
+        # Upload image to four.meme CDN if it's a local path, else use URL directly
+        import httpx as _httpx
+        if config.image_url.startswith("http"):
+            img_url = config.image_url
+        else:
+            img_url = await client.upload_image(config.image_url)
+
         create_result = await client.create_token(
             name=config.name,
             symbol=config.ticker,
             description=config.prompt[:200],
-            img_url=config.image_url,
-            raised_amount=config.raise_amount_bnb,
+            img_url=img_url,
+            presale_bnb=config.raise_amount_bnb,
             telegram=config.tg_channel_link,
+            creator_wallet=config.owner_wallet,
+            label="AI",
         )
         tx_hash = chain.submit_create_token(
             create_arg=create_result["createArg"],
