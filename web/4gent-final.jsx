@@ -132,10 +132,16 @@ function App() {
   }
 
   function connectWallet() {
-    // Force Privy modal — never use injected wallet directly
-    if (!authenticated) {
-      login();
+    console.log("[4gent] connectWallet clicked — ready:", ready, "authenticated:", authenticated, "embeddedWallet:", embeddedWallet?.address);
+    if (!ready) { console.log("[4gent] Privy not ready yet"); return; }
+    // If authenticated but no embedded wallet, logout first then re-login
+    if (authenticated && !embeddedWallet) {
+      console.log("[4gent] authenticated but no embedded wallet — re-logging in");
+      logout().then(() => login());
+      return;
     }
+    console.log("[4gent] calling login()");
+    login();
   }
 
   function canNext() {
@@ -631,10 +637,11 @@ function App() {
                 {!ready
                   ? <div style={{padding:"13px",border:"1px solid #E0D8C8",fontFamily:M,fontSize:9,color:"#A89868",letterSpacing:2}}>LOADING...</div>
                   : !authenticated || !wallet
-                  ? <button onClick={connectWallet} className="nb" style={{
+                  ? <button onClick={connectWallet} disabled={!ready} className="nb" style={{
                       width:"100%",padding:"13px",background:"#FEFCF5",
-                      border:`1px solid ${G}`,color:G,fontFamily:M,fontSize:11,letterSpacing:4,
-                    }}>◈ CONNECT WITH EMAIL / GOOGLE</button>
+                      border:`1px solid ${G}`,color:ready?G:"#C0B880",fontFamily:M,fontSize:11,letterSpacing:4,
+                      opacity:ready?1:0.5,cursor:ready?"pointer":"wait",
+                    }}>{ready ? "◈ CONNECT WITH EMAIL / GOOGLE" : "LOADING..."}</button>
                   : <div style={{padding:"11px 14px",border:"1px solid #5DB870",background:"rgba(93,184,112,0.05)",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
                       <div style={{display:"flex",alignItems:"center",gap:10}}>
                         <div className="pd" style={{width:7,height:7,borderRadius:"50%",background:"#5DB870",flexShrink:0}}/>
