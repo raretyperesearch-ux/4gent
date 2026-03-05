@@ -178,9 +178,9 @@ function App() {
       if (!imageUrl?.startsWith("http")) throw new Error("Invalid image URL returned");
       addLog("IMAGE UPLOADED ✓", true);
 
-      // ── Step 2: Prepare — backend fetches createArg + signature ──────────
-      addLog("FETCHING TOKEN CREATION ARGS FROM FOUR.MEME");
-      const prepRes = await fetch(`${API_URL}/launch/prepare`, {
+      // ── Step 2: Request payment — backend creates agent record + returns platform wallet ──
+      addLog("PREPARING LAUNCH — GENERATING AGENT RECORD");
+      const prepRes = await fetch(`${API_URL}/launch/request-payment`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -200,47 +200,41 @@ function App() {
       });
       if (!prepRes.ok) {
         const prepErr = await prepRes.json().catch(() => ({}));
-        throw new Error(prepErr.detail || "Prepare failed");
+        throw new Error(prepErr.detail || "Payment request failed");
       }
       const prep = await prepRes.json();
       setAgentId(prep.agent_id);
       addLog(`AGENT ID: ${prep.agent_id.slice(0,8).toUpperCase()} ✓`, true);
-      addLog("AWAITING WALLET SIGNATURE — CHECK METAMASK");
 
-      // ── Step 3: Submit createToken() tx from user's wallet (they pay gas) ─
-      // Calldata is fully encoded by the backend — no ABI encoding risk in JS
+      // ── Step 3: User sends 0.01 BNB to platform wallet via MetaMask ───────
+      addLog("AWAITING PAYMENT — CHECK METAMASK (0.01 BNB)");
       const activeWallet = wallets?.[0];
       if (!activeWallet) throw new Error("No wallet connected");
-
-      // Ensure we're on BSC mainnet (chainId 56)
-      await activeWallet.switchChain(56);
+      await activeWallet.switchChain(56); // BSC mainnet
       const provider = await activeWallet.getEthereumProvider();
-
-      const txHash = await provider.request({
+      const payTxHash = await provider.request({
         method: "eth_sendTransaction",
         params: [{
           from:  wallet,
-          to:    prep.contract_address,
-          value: "0x" + BigInt(prep.value_wei).toString(16),
-          data:  prep.calldata,    // ABI-encoded by backend — no manual encoding needed
-          // Gas estimated by wallet
+          to:    prep.platform_wallet,
+          value: "0x" + BigInt("10000000000000000").toString(16), // 0.01 BNB in wei
         }],
       });
+      addLog(`PAYMENT TX: ${payTxHash.slice(0,10)}... ✓`, true);
+      addLog("CONFIRMING PAYMENT ON BSC");
 
-      addLog(`TX SUBMITTED: ${txHash.slice(0,10)}... ✓`, true);
-      addLog("WAITING FOR BSC CONFIRMATION");
-
-      // ── Step 4: Confirm — backend takes over from here ───────────────────
-      const confRes = await fetch(`${API_URL}/launch/confirm/${prep.agent_id}`, {
+      // ── Step 4: Tell backend the payment tx hash — it watches + launches ──
+      const launchRes = await fetch(`${API_URL}/launch/confirm-payment/${prep.agent_id}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tx_hash: txHash }),
+        body: JSON.stringify({ tx_hash: payTxHash }),
       });
-      if (!confRes.ok) {
-        const confErr = await confRes.json().catch(() => ({}));
-        throw new Error(confErr.detail || "Confirm request failed");
+      if (!launchRes.ok) {
+        const launchErr = await launchRes.json().catch(() => ({}));
+        throw new Error(launchErr.detail || "Launch failed");
       }
-      addLog("PIPELINE RUNNING — SETTING UP BOT & CHANNEL");
+      const launch = await launchRes.json();
+      addLog("PAYMENT CONFIRMED — DEPLOYING TOKEN ON BSC");
 
       // ── Step 5: Poll until active ─────────────────────────────────────────
       const progressLogs = [
