@@ -194,7 +194,8 @@ async def meta_prepare(req: PrepareRequest):
         "status":          "pending",
     }).execute()
 
-    api_base = os.environ.get("API_BASE_URL", "https://4gent-api.railway.app")
+    domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN", os.environ.get("API_BASE_URL", "4gent-api.railway.app"))
+    api_base = f"https://{domain}" if not domain.startswith("http") else domain
     meta_url = f"{api_base}/meta/{agent_id}"
 
     return PrepareResponse(agent_id=agent_id, meta_url=meta_url)
