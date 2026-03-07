@@ -1,4 +1,5 @@
 "use client";
+import { ethers } from "ethers";
 
 import { useState, useEffect, useRef } from "react";
 import { PrivyProvider, usePrivy, useWallets, useConnectWallet } from "@privy-io/react-auth";
@@ -202,7 +203,6 @@ function App() {
       const provider = await activeWallet.getEthereumProvider();
 
       // Encode newToken(string name, string symbol, string meta) via ethers.js
-      const { ethers } = await import("https://cdnjs.cloudflare.com/ajax/libs/ethers/6.13.4/ethers.min.js");
       const iface = new ethers.Interface([
         "function newToken(string name, string symbol, string meta) payable returns (address)"
       ]);
