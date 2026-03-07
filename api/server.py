@@ -107,8 +107,8 @@ class PrepareRequest(BaseModel):
     archetype:       str   = Field(default="schemer")
     prompt:          str   = Field(default="", max_length=1000)
     image_url:       str   = ""           # base64 data URL or https URL
-    tg_channel_link: str   = Field(default="", min_length=1)
-    owner_wallet:    str   = Field(default="", min_length=1)
+    tg_channel_link: str   = Field(default="")
+    owner_wallet:    str   = Field(default="")
     trading_enabled: bool  = False
     max_trade_bnb:   float = Field(default=0.1, ge=0, le=10)
     daily_limit_bnb: float = Field(default=1.0, ge=0, le=50)
@@ -140,8 +140,6 @@ class AgentStatusResponse(BaseModel):
     agent_wallet:   Optional[str]
     bot_username:   Optional[str]
     claim_code:     Optional[str]
-    tg_verified:    bool
-    token_deployed: bool
     total_posts:    int
     total_trades:   int
     total_fees_bnb: float
@@ -312,8 +310,7 @@ async def get_agent(agent_id: str):
     db = get_db()
     resp = db.table("agents").select(
         "id, name, ticker, status, token_address, agent_wallet, "
-        "tg_verified, token_deployed, total_posts, total_trades, "
-        "total_fees_bnb, error_message, claim_code, tg_bot_id"
+        "claim_code, tg_bot_id, total_posts, total_trades, total_fees_bnb, error_message"
     ).eq("id", agent_id).execute()
 
     if not resp.data:
@@ -326,6 +323,16 @@ async def get_agent(agent_id: str):
         if bot_resp.data:
             bot_username = bot_resp.data[0]["bot_username"]
 
+    # Resolve bot_username from tg_bot_id if present
+    bot_username = None
+    if a.get("tg_bot_id"):
+        try:
+            bot = db.table("bot_pool").select("bot_username").eq("id", a["tg_bot_id"]).execute()
+            if bot.data:
+                bot_username = bot.data[0]["bot_username"]
+        except Exception:
+            pass
+
     return AgentStatusResponse(
         agent_id=      a["id"],
         name=          a["name"],
@@ -335,8 +342,6 @@ async def get_agent(agent_id: str):
         agent_wallet=  a.get("agent_wallet"),
         bot_username=  bot_username,
         claim_code=    a.get("claim_code"),
-        tg_verified=   a.get("tg_verified", False),
-        token_deployed=a.get("token_deployed", False),
         total_posts=   a.get("total_posts", 0),
         total_trades=  a.get("total_trades", 0),
         total_fees_bnb=float(a.get("total_fees_bnb", 0)),
